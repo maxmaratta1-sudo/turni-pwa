@@ -29,20 +29,36 @@ export default function DipendenteePage() {
   }, [token, schedule_id])
 
   async function loadData() {
-    const res = await fetch(`/api/unavailabilities?token=${token}&schedule_id=${schedule_id}`)
+    const res = await fetch(`/api/unavailabilities?token=${token}&schedule_id=${schedule_id ?? ''}`)
     const data = await res.json()
     if (data.employee) {
       setEmployee(data.employee)
       setSelectedDates(new Set(data.unavailabilities.map((u: any) => u.data)))
     }
 
-    // Carica info schedule
     const { createClient } = await import('@supabase/supabase-js')
     const sb = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
     )
-    const { data: sched } = await sb.from('schedules').select('*').eq('id', schedule_id).single()
+
+    let sched = null
+    if (schedule_id && schedule_id !== 'undefined' && schedule_id !== 'null') {
+      const { data: s } = await sb.from('schedules').select('*').eq('id', schedule_id).single()
+      sched = s
+    }
+
+    // Se non c'è schedule_id valido, prendi il piano del mese corrente per questo store
+    if (!sched && data.employee?.store_id) {
+      const now = new Date()
+      const { data: s } = await sb.from('schedules').select('*')
+        .eq('store_id', data.employee.store_id)
+        .eq('mese', now.getMonth() + 1)
+        .eq('anno', now.getFullYear())
+        .maybeSingle()
+      sched = s
+    }
+
     setSchedule(sched)
     setLoading(false)
   }

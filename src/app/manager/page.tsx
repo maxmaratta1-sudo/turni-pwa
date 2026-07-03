@@ -1,11 +1,14 @@
 'use client'
 import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
-import { Employee, Schedule, Shift } from '@/types'
+import { Employee, Schedule, Shift, TurnoTipo } from '@/types'
 
 const STORE_ID = process.env.NEXT_PUBLIC_STORE_ID || ''
 const MESI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
                'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre']
+const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
+  mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina'
+}
 const TURNO_LABEL: Record<string, string> = {
   mattina: 'M', pomeriggio: 'P', full: 'F', riposo: '—'
 }
@@ -16,38 +19,62 @@ const TURNO_COLOR: Record<string, string> = {
   riposo: 'bg-gray-100 text-gray-400'
 }
 
+interface Unavailability {
+  id: string
+  employee_id: string
+  schedule_id: string
+  data: string
+  motivo: string | null
+}
+
 export default function ManagerPage() {
-  const today = new Date()
-  const [mese, setMese] = useState(today.getMonth() + 1)
-  const [anno, setAnno] = useState(today.getFullYear())
+  const [mese, setMese] = useState(1)
+  const [anno, setAnno] = useState(2026)
   const [employees, setEmployees] = useState<Employee[]>([])
   const [schedule, setSchedule] = useState<Schedule | null>(null)
   const [shifts, setShifts] = useState<Shift[]>([])
+  const [unavailabilities, setUnavailabilities] = useState<Unavailability[]>([])
   const [loading, setLoading] = useState(false)
   const [newEmp, setNewEmp] = useState({ nome: '', ore_settimanali: 20 })
+  const [error, setError] = useState<string | null>(null)
 
   const giorni = getDays(anno, mese)
+
+  useEffect(() => {
+    const today = new Date()
+    setMese(today.getMonth() + 1)
+    setAnno(today.getFullYear())
+  }, [])
 
   useEffect(() => { loadData() }, [mese, anno])
 
   async function loadData() {
     setLoading(true)
-    // Employees
-    const { data: emps } = await supabase.from('employees')
-      .select('*').eq('store_id', STORE_ID).eq('attivo', true).order('nome')
-    setEmployees(emps || [])
+    setError(null)
+    try {
+      const { data: emps, error: empErr } = await supabase.from('employees')
+        .select('*').eq('store_id', STORE_ID).eq('attivo', true).order('nome')
+      if (empErr) { setError(`employees: ${empErr.message}`); setLoading(false); return }
+      setEmployees(emps || [])
 
-    // Schedule
-    const { data: sched } = await supabase.from('schedules')
-      .select('*').eq('store_id', STORE_ID).eq('mese', mese).eq('anno', anno).maybeSingle()
-    setSchedule(sched)
+      const { data: sched, error: schedErr } = await supabase.from('schedules')
+        .select('*').eq('store_id', STORE_ID).eq('mese', mese).eq('anno', anno).maybeSingle()
+      if (schedErr) { setError(`schedules: ${schedErr.message}`); setLoading(false); return }
+      setSchedule(sched)
 
-    // Shifts
-    if (sched) {
-      const { data: sh } = await supabase.from('shifts').select('*').eq('schedule_id', sched.id)
-      setShifts(sh || [])
-    } else {
-      setShifts([])
+      if (sched) {
+        const { data: sh } = await supabase.from('shifts').select('*').eq('schedule_id', sched.id)
+        setShifts(sh || [])
+
+        const { data: unav } = await supabase.from('unavailabilities')
+          .select('*').eq('schedule_id', sched.id)
+        setUnavailabilities(unav || [])
+      } else {
+        setShifts([])
+        setUnavailabilities([])
+      }
+    } catch (e: any) {
+      setError(`Errore: ${e?.message ?? String(e)}`)
     }
     setLoading(false)
   }
@@ -90,13 +117,78 @@ export default function ManagerPage() {
     return shifts.find(s => s.employee_id === empId && s.data === data)
   }
 
+  function hasUnavailability(empId: string, data: string) {
+    return unavailabilities.some(u => u.employee_id === empId && u.data === data)
+  }
+
+  async function cycleShift(empId: string, data: string) {
+    if (!schedule) return
+    const existing = getShift(empId, data)
+    const currentTipo: TurnoTipo = (existing?.tipo as TurnoTipo) ?? 'riposo'
+    const nextTipo = TURNO_CYCLE[currentTipo]
+
+    // Aggiornamento ottimistico
+    if (existing) {
+      setShifts(prev => prev.map(s =>
+        s.employee_id === empId && s.data === data ? { ...s, tipo: nextTipo } : s
+      ))
+    } else {
+      const optimistic: Shift = {
+        id: `temp-${empId}-${data}`,
+        schedule_id: schedule.id,
+        employee_id: empId,
+        data,
+        tipo: nextTipo,
+        ora_inizio: undefined,
+        ora_fine: undefined
+      }
+      setShifts(prev => [...prev, optimistic])
+    }
+
+    // Persist su Supabase
+    if (existing) {
+      await supabase.from('shifts').update({ tipo: nextTipo }).eq('id', existing.id)
+    } else {
+      const { data: newShift } = await supabase.from('shifts')
+        .insert({ schedule_id: schedule.id, employee_id: empId, data, tipo: nextTipo })
+        .select().single()
+      if (newShift) {
+        setShifts(prev => prev.map(s =>
+          s.id === `temp-${empId}-${data}` ? newShift : s
+        ))
+      }
+    }
+  }
+
+  // Raggruppa unavailabilities per dipendente per il pannello
+  const unavByEmployee = employees.reduce<Record<string, string[]>>((acc, emp) => {
+    const dates = unavailabilities
+      .filter(u => u.employee_id === emp.id)
+      .map(u => u.data)
+      .sort()
+    if (dates.length > 0) acc[emp.id] = dates
+    return acc
+  }, {})
+
+  if (error) return (
+    <div className="min-h-screen bg-gray-50 p-8">
+      <div className="bg-red-50 border border-red-200 rounded-xl p-6 max-w-2xl mx-auto">
+        <h2 className="text-red-700 font-bold text-lg mb-2">❌ Errore di caricamento</h2>
+        <pre className="text-red-600 text-sm whitespace-pre-wrap">{error}</pre>
+        <div className="mt-4 text-xs text-gray-500">
+          STORE_ID: {STORE_ID || '(vuoto)'} · URL: {process.env.NEXT_PUBLIC_SUPABASE_URL?.slice(0,30) || '(vuoto)'}
+        </div>
+      </div>
+    </div>
+  )
+
   return (
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-7xl mx-auto">
         <h1 className="text-2xl font-bold text-gray-800 mb-6">📅 Gestione Turni</h1>
 
         {/* Selettore mese */}
-        <div className="flex gap-3 mb-6 items-center">
+        <div className="flex gap-3 mb-6 items-center flex-wrap">
           <select className="border rounded px-3 py-2" value={mese} onChange={e => setMese(+e.target.value)}>
             {MESI.map((m, i) => <option key={i} value={i+1}>{m}</option>)}
           </select>
@@ -131,9 +223,9 @@ export default function ManagerPage() {
         {/* Aggiungi dipendente */}
         <div className="bg-white rounded-xl shadow-sm p-4 mb-6">
           <h2 className="font-semibold text-gray-700 mb-3">👤 Dipendenti</h2>
-          <div className="flex gap-3 mb-4">
+          <div className="flex gap-3 mb-4 flex-wrap">
             <input type="text" placeholder="Nome dipendente"
-              className="border rounded px-3 py-2 flex-1"
+              className="border rounded px-3 py-2 flex-1 min-w-48"
               value={newEmp.nome} onChange={e => setNewEmp({...newEmp, nome: e.target.value})} />
             <select className="border rounded px-3 py-2"
               value={newEmp.ore_settimanali} onChange={e => setNewEmp({...newEmp, ore_settimanali: +e.target.value})}>
@@ -150,7 +242,7 @@ export default function ManagerPage() {
               <div key={e.id} className="flex items-center gap-2 bg-gray-100 rounded-lg px-3 py-2 text-sm">
                 <span className="font-medium">{e.nome}</span>
                 <span className="text-gray-500">{e.ore_settimanali}h</span>
-                <a href={`/dipendente/${e.token}?schedule_id=${schedule?.id}`}
+                <a href={`/dipendente/${e.token}?schedule_id=${schedule?.id ?? ''}`}
                   target="_blank" className="text-blue-600 hover:underline text-xs">
                   🔗 Link
                 </a>
@@ -161,7 +253,7 @@ export default function ManagerPage() {
 
         {/* Tabella turni */}
         {shifts.length > 0 && (
-          <div className="bg-white rounded-xl shadow-sm overflow-x-auto">
+          <div className="bg-white rounded-xl shadow-sm overflow-x-auto mb-6">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b">
@@ -184,11 +276,31 @@ export default function ManagerPage() {
                     {giorni.map(g => {
                       const shift = getShift(emp.id, g.data)
                       const tipo = shift?.tipo || 'riposo'
+                      const isPermesso = hasUnavailability(emp.id, g.data)
+
+                      if (isPermesso && tipo === 'riposo') {
+                        return (
+                          <td key={g.data} className={`p-1 text-center ${g.domenica ? 'bg-red-50' : ''}`}>
+                            <button
+                              onClick={() => !g.domenica && cycleShift(emp.id, g.data)}
+                              disabled={g.domenica}
+                              title="Permesso"
+                              className="inline-block px-1 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-800 hover:opacity-80 disabled:cursor-not-allowed">
+                              P
+                            </button>
+                          </td>
+                        )
+                      }
+
                       return (
                         <td key={g.data} className={`p-1 text-center ${g.domenica ? 'bg-red-50' : ''}`}>
-                          <span className={`inline-block px-1 py-0.5 rounded text-xs font-bold ${TURNO_COLOR[tipo]}`}>
+                          <button
+                            onClick={() => !g.domenica && cycleShift(emp.id, g.data)}
+                            disabled={g.domenica}
+                            title={`Click per cambiare (attuale: ${tipo})`}
+                            className={`inline-block px-1 py-0.5 rounded text-xs font-bold hover:opacity-80 disabled:cursor-not-allowed ${TURNO_COLOR[tipo]}`}>
                             {TURNO_LABEL[tipo]}
-                          </span>
+                          </button>
                         </td>
                       )
                     })}
@@ -196,11 +308,39 @@ export default function ManagerPage() {
                 ))}
               </tbody>
             </table>
-            <div className="p-3 text-xs text-gray-400 flex gap-4">
+            <div className="p-3 text-xs text-gray-400 flex gap-4 flex-wrap">
               <span><strong>M</strong> = Mattina 9-14</span>
               <span><strong>P</strong> = Pomeriggio 14-20</span>
               <span><strong>F</strong> = Full 9-20</span>
               <span><strong>—</strong> = Riposo</span>
+              <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
+            </div>
+          </div>
+        )}
+
+        {/* Pannello permessi mensili */}
+        {Object.keys(unavByEmployee).length > 0 && (
+          <div className="bg-white rounded-xl shadow-sm p-4">
+            <h2 className="font-semibold text-gray-700 mb-3">🟡 Permessi del mese</h2>
+            <div className="space-y-2">
+              {employees
+                .filter(emp => unavByEmployee[emp.id])
+                .map(emp => {
+                  const dates = unavByEmployee[emp.id]
+                  const formatted = dates.map(d => {
+                    const dt = new Date(d + 'T00:00:00')
+                    return `${dt.getDate()} ${MESI[dt.getMonth()]}`
+                  })
+                  return (
+                    <div key={emp.id} className="flex items-start gap-3 py-2 border-b last:border-0">
+                      <span className="font-medium text-gray-800 min-w-28">{emp.nome}</span>
+                      <span className="text-gray-600 text-sm flex-1">{formatted.join(', ')}</span>
+                      <span className="text-yellow-700 text-sm font-medium whitespace-nowrap">
+                        Tot: {dates.length} {dates.length === 1 ? 'giorno' : 'giorni'}
+                      </span>
+                    </div>
+                  )
+                })}
             </div>
           </div>
         )}
