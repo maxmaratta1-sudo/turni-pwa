@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import { Employee, Schedule, Shift, TurnoTipo } from '@/types'
 
@@ -37,6 +37,8 @@ export default function ManagerPage() {
   const [loading, setLoading] = useState(false)
   const [newEmp, setNewEmp] = useState({ nome: '', ore_settimanali: 20 })
   const [error, setError] = useState<string | null>(null)
+  const [copiedToken, setCopiedToken] = useState<string | null>(null)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const giorni = getDays(anno, mese)
 
@@ -115,6 +117,55 @@ export default function ManagerPage() {
 
   function getShift(empId: string, data: string) {
     return shifts.find(s => s.employee_id === empId && s.data === data)
+  }
+
+  function copyLink(emp: Employee) {
+    const schedId = schedule?.id ?? ''
+    const url = `https://turni-pwa-v2.vercel.app/dipendente/${emp.token}?schedule_id=${schedId}`
+    navigator.clipboard.writeText(url)
+    setCopiedToken(emp.token)
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = setTimeout(() => setCopiedToken(null), 2000)
+  }
+
+  async function exportPDF() {
+    const { jsPDF } = await import('jspdf')
+    const { autoTable } = await import('jspdf-autotable')
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
+
+    const nomeMese = MESI[mese - 1]
+    doc.setFontSize(14)
+    doc.text(`Turni ${nomeMese} ${anno} — Stroili Oasi Lanciano`, 14, 14)
+
+    const head = [['Dipendente', ...giorni.map(g => `${g.num}\n${g.giorno}`)]]
+    const body = employees.map(emp => [
+      emp.nome,
+      ...giorni.map(g => {
+        if (hasUnavailability(emp.id, g.data)) return 'P'
+        const shift = getShift(emp.id, g.data)
+        return TURNO_LABEL[shift?.tipo || 'riposo']
+      })
+    ])
+
+    autoTable(doc, {
+      head,
+      body,
+      startY: 20,
+      styles: { fontSize: 7, cellPadding: 2, halign: 'center' },
+      columnStyles: { 0: { halign: 'left', cellWidth: 30 } },
+      headStyles: { fillColor: [99, 102, 241], fontSize: 7 },
+      didParseCell: (data) => {
+        if (data.section === 'body' && data.column.index > 0) {
+          const val = data.cell.raw as string
+          if (val === 'M') data.cell.styles.fillColor = [219, 234, 254]
+          else if (val === 'P' && data.column.index > 0) data.cell.styles.fillColor = [254, 243, 199]
+          else if (val === 'F') data.cell.styles.fillColor = [220, 252, 231]
+          else if (val === '—') data.cell.styles.fillColor = [243, 244, 246]
+        }
+      }
+    })
+
+    doc.save(`turni-${nomeMese.toLowerCase()}-${anno}.pdf`)
   }
 
   function hasUnavailability(empId: string, data: string) {
@@ -211,6 +262,11 @@ export default function ManagerPage() {
                   ✅ Pubblica
                 </button>
               )}
+              {shifts.length > 0 && (
+                <button onClick={exportPDF} className="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700">
+                  📄 Crea PDF
+                </button>
+              )}
               <span className={`px-3 py-1 rounded-full text-sm font-medium ${
                 schedule.stato === 'pubblicato' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
               }`}>
@@ -242,10 +298,11 @@ export default function ManagerPage() {
               <div key={e.id} className="flex items-center gap-2 bg-gray-100 rounded-lg px-3 py-2 text-sm">
                 <span className="font-medium">{e.nome}</span>
                 <span className="text-gray-500">{e.ore_settimanali}h</span>
-                <a href={`/dipendente/${e.token}?schedule_id=${schedule?.id ?? ''}`}
-                  target="_blank" className="text-blue-600 hover:underline text-xs">
-                  🔗 Link
-                </a>
+                <button
+                  onClick={() => copyLink(e)}
+                  className="text-xs px-2 py-0.5 rounded transition-colors duration-150 bg-blue-100 text-blue-700 hover:bg-blue-200">
+                  {copiedToken === e.token ? '✅ Copiato!' : '🔗 Link'}
+                </button>
               </div>
             ))}
           </div>
