@@ -1,9 +1,9 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { Employee, Schedule, Shift, TurnoTipo } from '@/types'
 
-const STORE_ID = process.env.NEXT_PUBLIC_STORE_ID || ''
 const MESI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
                'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre']
 const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
@@ -28,6 +28,9 @@ interface Unavailability {
 }
 
 export default function ManagerPage() {
+  const router = useRouter()
+  const [storeId, setStoreId] = useState<string | null>(null)
+  const [storeNome, setStoreNome] = useState('')
   const [mese, setMese] = useState(1)
   const [anno, setAnno] = useState(2026)
   const [employees, setEmployees] = useState<Employee[]>([])
@@ -43,24 +46,28 @@ export default function ManagerPage() {
   const giorni = getDays(anno, mese)
 
   useEffect(() => {
+    const id = localStorage.getItem('turni_store_id')
+    if (!id) { router.replace('/login'); return }
+    setStoreId(id)
+    setStoreNome(localStorage.getItem('turni_store_nome') ?? '')
     const today = new Date()
     setMese(today.getMonth() + 1)
     setAnno(today.getFullYear())
   }, [])
 
-  useEffect(() => { loadData() }, [mese, anno])
+  useEffect(() => { if (storeId) loadData() }, [mese, anno, storeId])
 
   async function loadData() {
     setLoading(true)
     setError(null)
     try {
       const { data: emps, error: empErr } = await supabase.from('employees')
-        .select('*').eq('store_id', STORE_ID).eq('attivo', true).order('nome')
+        .select('*').eq('store_id', storeId!).eq('attivo', true).order('nome')
       if (empErr) { setError(`employees: ${empErr.message}`); setLoading(false); return }
       setEmployees(emps || [])
 
       const { data: sched, error: schedErr } = await supabase.from('schedules')
-        .select('*').eq('store_id', STORE_ID).eq('mese', mese).eq('anno', anno).maybeSingle()
+        .select('*').eq('store_id', storeId!).eq('mese', mese).eq('anno', anno).maybeSingle()
       if (schedErr) { setError(`schedules: ${schedErr.message}`); setLoading(false); return }
       setSchedule(sched)
 
@@ -83,7 +90,7 @@ export default function ManagerPage() {
 
   async function createSchedule() {
     const { data } = await supabase.from('schedules')
-      .insert({ store_id: STORE_ID, mese, anno, stato: 'bozza' }).select().single()
+      .insert({ store_id: storeId!, mese, anno, stato: 'bozza' }).select().single()
     setSchedule(data)
   }
 
@@ -109,7 +116,7 @@ export default function ManagerPage() {
     await fetch('/api/employees', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...newEmp, store_id: STORE_ID })
+      body: JSON.stringify({ ...newEmp, store_id: storeId! })
     })
     setNewEmp({ nome: '', ore_settimanali: 20 })
     loadData()
@@ -117,6 +124,13 @@ export default function ManagerPage() {
 
   function getShift(empId: string, data: string) {
     return shifts.find(s => s.employee_id === empId && s.data === data)
+  }
+
+  function logout() {
+    localStorage.removeItem('turni_store_id')
+    localStorage.removeItem('turni_store_nome')
+    localStorage.removeItem('turni_email')
+    router.replace('/login')
   }
 
   function copyLink(emp: Employee) {
@@ -227,7 +241,7 @@ export default function ManagerPage() {
         <h2 className="text-red-700 font-bold text-lg mb-2">❌ Errore di caricamento</h2>
         <pre className="text-red-600 text-sm whitespace-pre-wrap">{error}</pre>
         <div className="mt-4 text-xs text-gray-500">
-          STORE_ID: {STORE_ID || '(vuoto)'} · URL: {process.env.NEXT_PUBLIC_SUPABASE_URL?.slice(0,30) || '(vuoto)'}
+          Store: {storeId ?? '(vuoto)'} · URL: {process.env.NEXT_PUBLIC_SUPABASE_URL?.slice(0,30) || '(vuoto)'}
         </div>
       </div>
     </div>
@@ -236,7 +250,16 @@ export default function ManagerPage() {
   return (
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-7xl mx-auto">
-        <h1 className="text-2xl font-bold text-gray-800 mb-6">📅 Gestione Turni</h1>
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-800">📅 Gestione Turni</h1>
+            {storeNome && <p className="text-sm text-gray-500 mt-0.5">{storeNome}</p>}
+          </div>
+          <button onClick={logout}
+            className="text-sm text-gray-500 hover:text-gray-700 border rounded-lg px-3 py-1.5 hover:bg-gray-50 transition">
+            Esci
+          </button>
+        </div>
 
         {/* Selettore mese */}
         <div className="flex gap-3 mb-6 items-center flex-wrap">
