@@ -4,6 +4,7 @@ import { useParams, useSearchParams } from 'next/navigation'
 
 interface Employee {
   id: string
+  store_id: string
   nome: string
   ore_settimanali: number
 }
@@ -14,27 +15,25 @@ const MESI = ['','Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
 export default function DipendenteePage() {
   const { token } = useParams<{ token: string }>()
   const searchParams = useSearchParams()
-  const schedule_id = searchParams.get('schedule_id')
+  const scheduleIdParam = searchParams.get('schedule_id')
 
   const [employee, setEmployee] = useState<Employee | null>(null)
   const [schedule, setSchedule] = useState<any>(null)
+  const [resolvedScheduleId, setResolvedScheduleId] = useState<string | null>(null)
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set())
   const [motivo, setMotivo] = useState('')
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    if (!token || !schedule_id) return
-    loadData()
-  }, [token, schedule_id])
+    if (token) loadData()
+  }, [token])
 
   async function loadData() {
-    const res = await fetch(`/api/unavailabilities?token=${token}&schedule_id=${schedule_id ?? ''}`)
+    const res = await fetch(`/api/unavailabilities?token=${token}&schedule_id=${scheduleIdParam ?? ''}`)
     const data = await res.json()
-    if (data.employee) {
-      setEmployee(data.employee)
-      setSelectedDates(new Set(data.unavailabilities.map((u: any) => u.data)))
-    }
+    if (!data.employee) { setLoading(false); return }
+    setEmployee(data.employee)
 
     const { createClient } = await import('@supabase/supabase-js')
     const sb = createClient(
@@ -42,13 +41,13 @@ export default function DipendenteePage() {
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
     )
 
+    // Risolvi lo schedule: prima prova URL param, poi fallback mese corrente
     let sched = null
-    if (schedule_id && schedule_id !== 'undefined' && schedule_id !== 'null') {
-      const { data: s } = await sb.from('schedules').select('*').eq('id', schedule_id).single()
+    const paramOk = scheduleIdParam && scheduleIdParam !== 'undefined' && scheduleIdParam !== 'null' && scheduleIdParam !== ''
+    if (paramOk) {
+      const { data: s } = await sb.from('schedules').select('*').eq('id', scheduleIdParam).single()
       sched = s
     }
-
-    // Se non c'è schedule_id valido, prendi il piano del mese corrente per questo store
     if (!sched && data.employee?.store_id) {
       const now = new Date()
       const { data: s } = await sb.from('schedules').select('*')
@@ -60,6 +59,20 @@ export default function DipendenteePage() {
     }
 
     setSchedule(sched)
+    setResolvedScheduleId(sched?.id ?? null)
+
+    // Carica unavailabilities con lo schedule risolto
+    if (sched?.id) {
+      const { data: unavRes } = await sb.from('unavailabilities')
+        .select('*')
+        .eq('employee_id', data.employee.id)
+        .eq('schedule_id', sched.id)
+      setSelectedDates(new Set((unavRes || []).map((u: any) => u.data)))
+      // Carica motivo se c'è un solo motivo comune (prendi il primo)
+      const firstMotivo = unavRes?.[0]?.motivo
+      if (firstMotivo) setMotivo(firstMotivo)
+    }
+
     setLoading(false)
   }
 
@@ -72,11 +85,13 @@ export default function DipendenteePage() {
   }
 
   async function salva() {
+    if (!resolvedScheduleId) return
     const res = await fetch('/api/unavailabilities', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        token, schedule_id,
+        token,
+        schedule_id: resolvedScheduleId,
         dates: Array.from(selectedDates),
         motivo
       })
@@ -86,19 +101,24 @@ export default function DipendenteePage() {
 
   if (loading) return <div className="min-h-screen flex items-center justify-center text-gray-500">Caricamento...</div>
   if (!employee) return <div className="min-h-screen flex items-center justify-center text-red-500">Link non valido</div>
+  if (!schedule) return (
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-sm p-6 text-center max-w-sm">
+        <p className="text-gray-500">Nessun piano turni attivo per questo mese.<br/>Contatta il tuo responsabile.</p>
+      </div>
+    </div>
+  )
 
-  const giorni = schedule ? getDays(schedule.anno, schedule.mese) : []
+  const giorni = getDays(schedule.anno, schedule.mese)
 
   return (
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-lg mx-auto">
         <div className="bg-white rounded-2xl shadow-sm p-6 mb-4">
           <h1 className="text-xl font-bold text-gray-800">Ciao {employee.nome}! 👋</h1>
-          {schedule && (
-            <p className="text-gray-500 mt-1">
-              Turni di {MESI[schedule.mese]} {schedule.anno}
-            </p>
-          )}
+          <p className="text-gray-500 mt-1">
+            Turni di {MESI[schedule.mese]} {schedule.anno}
+          </p>
           <p className="text-sm text-gray-600 mt-3">
             Seleziona i giorni in cui <strong>non sei disponibile</strong>.<br/>
             Se non hai problemi, lascia tutto vuoto e salva.
@@ -128,7 +148,9 @@ export default function DipendenteePage() {
           className={`w-full py-3 rounded-xl font-semibold text-white transition ${
             saved ? 'bg-green-500' : 'bg-blue-600 hover:bg-blue-700'
           }`}>
-          {saved ? '✅ Salvato!' : selectedDates.size > 0 ? `Invia ${selectedDates.size} giorni di indisponibilità` : 'Nessun problema — Salva disponibilità'}
+          {saved ? '✅ Salvato!' : selectedDates.size > 0
+            ? `Invia ${selectedDates.size} giorni di indisponibilità`
+            : 'Nessun problema — Salva disponibilità'}
         </button>
       </div>
     </div>
@@ -136,12 +158,13 @@ export default function DipendenteePage() {
 }
 
 function CalGrid({ giorni, selected, onToggle }: {
-  giorni: any[],
+  giorni: ReturnType<typeof getDays>,
   selected: Set<string>,
   onToggle: (d: string) => void
 }) {
   if (!giorni.length) return null
-  const firstDay = new Date(giorni[0].data).getDay()
+  // Fix timezone: parse come data locale aggiungendo T00:00:00
+  const firstDay = new Date(giorni[0].data + 'T00:00:00').getDay()
   const offset = firstDay === 0 ? 6 : firstDay - 1
 
   return (
@@ -161,12 +184,16 @@ function CalGrid({ giorni, selected, onToggle }: {
   )
 }
 
+// Fix timezone: usa formato YYYY-MM-DD locale senza toISOString (che converte in UTC)
 function getDays(anno: number, mese: number) {
   const days = []
   const d = new Date(anno, mese - 1, 1)
   while (d.getMonth() === mese - 1) {
+    const yyyy = d.getFullYear()
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
     days.push({
-      data: d.toISOString().split('T')[0],
+      data: `${yyyy}-${mm}-${dd}`,
       num: d.getDate(),
       domenica: d.getDay() === 0
     })

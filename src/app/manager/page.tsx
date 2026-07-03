@@ -44,6 +44,7 @@ export default function ManagerPage() {
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [cestino, setCestino] = useState<Employee[]>([])
   const [showCestino, setShowCestino] = useState(false)
+  const [dettaglioEmp, setDettaglioEmp] = useState<Employee | null>(null)
 
   const giorni = getDays(anno, mese)
 
@@ -411,8 +412,12 @@ export default function ManagerPage() {
                 {employees.map(emp => (
                   <tr key={emp.id} className="border-b hover:bg-gray-50">
                     <td className="p-3 font-medium text-gray-800 sticky left-0 bg-white">
-                      <div>{emp.nome}</div>
-                      <div className="text-xs text-gray-400">{emp.ore_settimanali}h</div>
+                      <button
+                        onClick={() => setDettaglioEmp(emp)}
+                        className="text-left hover:text-blue-600 transition-colors">
+                        <div>{emp.nome}</div>
+                        <div className="text-xs text-gray-400">{emp.ore_settimanali}h</div>
+                      </button>
                     </td>
                     {giorni.map(g => {
                       const shift = getShift(emp.id, g.data)
@@ -486,6 +491,41 @@ export default function ManagerPage() {
           </div>
         )}
       </div>
+
+      {/* Modal dettaglio permessi dipendente */}
+      {dettaglioEmp && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
+          onClick={() => setDettaglioEmp(null)}>
+          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-md w-full"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-bold text-gray-800 text-lg">🟡 Permessi — {dettaglioEmp.nome}</h2>
+              <button onClick={() => setDettaglioEmp(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+            </div>
+            {(() => {
+              const empUnavs = unavailabilities.filter(u => u.employee_id === dettaglioEmp.id)
+              if (empUnavs.length === 0) return (
+                <p className="text-gray-500 text-sm">Nessun permesso registrato per questo mese.</p>
+              )
+              return (
+                <div className="space-y-2">
+                  {empUnavs.sort((a,b) => a.data.localeCompare(b.data)).map(u => {
+                    const dt = new Date(u.data + 'T00:00:00')
+                    const label = `${dt.getDate()} ${MESI[dt.getMonth() + 1]}`
+                    return (
+                      <div key={u.id} className="flex items-start gap-3 py-2 border-b last:border-0">
+                        <span className="font-medium text-gray-700 min-w-20">{label}</span>
+                        <span className="text-gray-500 text-sm italic">{u.motivo || '—'}</span>
+                      </div>
+                    )
+                  })}
+                  <p className="text-xs text-gray-400 pt-1">Tot: {empUnavs.length} {empUnavs.length === 1 ? 'giorno' : 'giorni'}</p>
+                </div>
+              )
+            })()}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -495,8 +535,11 @@ function getDays(anno: number, mese: number) {
   const d = new Date(anno, mese - 1, 1)
   const GIORNI = ['Dom','Lun','Mar','Mer','Gio','Ven','Sab']
   while (d.getMonth() === mese - 1) {
+    const yyyy = d.getFullYear()
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
     days.push({
-      data: d.toISOString().split('T')[0],
+      data: `${yyyy}-${mm}-${dd}`,
       num: d.getDate(),
       giorno: GIORNI[d.getDay()],
       domenica: d.getDay() === 0
