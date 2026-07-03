@@ -345,7 +345,7 @@ export default function ManagerPage() {
           <div className="flex flex-wrap gap-2">
             {employees.map(e => (
               <div key={e.id} className="flex items-center gap-2 bg-gray-100 rounded-lg px-3 py-2 text-sm">
-                <span className="font-medium">{e.nome}</span>
+                <button onClick={() => setDettaglioEmp(e)} className="font-medium hover:text-blue-600 transition-colors">{e.nome}</button>
                 <span className="text-gray-500">{e.ore_settimanali}h</span>
                 <button
                   onClick={() => copyLink(e)}
@@ -479,7 +479,7 @@ export default function ManagerPage() {
                   })
                   return (
                     <div key={emp.id} className="flex items-start gap-3 py-2 border-b last:border-0">
-                      <span className="font-medium text-gray-800 min-w-28">{emp.nome}</span>
+                      <button onClick={() => setDettaglioEmp(emp)} className="font-medium text-gray-800 min-w-28 text-left hover:text-blue-600 transition-colors">{emp.nome}</button>
                       <span className="text-gray-600 text-sm flex-1">{formatted.join(', ')}</span>
                       <span className="text-yellow-700 text-sm font-medium whitespace-nowrap">
                         Tot: {dates.length} {dates.length === 1 ? 'giorno' : 'giorni'}
