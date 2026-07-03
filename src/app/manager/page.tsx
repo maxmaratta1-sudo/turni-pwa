@@ -42,6 +42,8 @@ export default function ManagerPage() {
   const [error, setError] = useState<string | null>(null)
   const [copiedToken, setCopiedToken] = useState<string | null>(null)
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [cestino, setCestino] = useState<Employee[]>([])
+  const [showCestino, setShowCestino] = useState(false)
 
   const giorni = getDays(anno, mese)
 
@@ -61,6 +63,10 @@ export default function ManagerPage() {
     setLoading(true)
     setError(null)
     try {
+      const { data: inCestino } = await supabase.from('employees')
+        .select('*').eq('store_id', storeId!).eq('attivo', false).order('nome')
+      setCestino(inCestino || [])
+
       const { data: emps, error: empErr } = await supabase.from('employees')
         .select('*').eq('store_id', storeId!).eq('attivo', true).order('nome')
       if (empErr) { setError(`employees: ${empErr.message}`); setLoading(false); return }
@@ -124,6 +130,28 @@ export default function ManagerPage() {
 
   function getShift(empId: string, data: string) {
     return shifts.find(s => s.employee_id === empId && s.data === data)
+  }
+
+  async function cancellaEmployee(emp: Employee) {
+    await supabase.from('employees').update({ attivo: false }).eq('id', emp.id)
+    setEmployees(prev => prev.filter(e => e.id !== emp.id))
+    setCestino(prev => [...prev, emp])
+  }
+
+  async function ripristinaEmployee(emp: Employee) {
+    await supabase.from('employees').update({ attivo: true }).eq('id', emp.id)
+    setCestino(prev => prev.filter(e => e.id !== emp.id))
+    setEmployees(prev => [...prev, emp].sort((a, b) => a.nome.localeCompare(b.nome)))
+  }
+
+  async function svuotaCestino() {
+    for (const emp of cestino) {
+      await supabase.from('shifts').delete().eq('employee_id', emp.id)
+      await supabase.from('unavailabilities').delete().eq('employee_id', emp.id)
+      await supabase.from('employees').delete().eq('id', emp.id)
+    }
+    setCestino([])
+    setShowCestino(false)
   }
 
   function logout() {
@@ -251,10 +279,7 @@ export default function ManagerPage() {
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-6">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-800">📅 Gestione Turni</h1>
-            {storeNome && <p className="text-sm text-gray-500 mt-0.5">{storeNome}</p>}
-          </div>
+          <h1 className="text-2xl font-bold text-gray-800">📅 Gestione Turni</h1>
           <button onClick={logout}
             className="text-sm text-gray-500 hover:text-gray-700 border rounded-lg px-3 py-1.5 hover:bg-gray-50 transition">
             Esci
@@ -326,9 +351,45 @@ export default function ManagerPage() {
                   className="text-xs px-2 py-0.5 rounded transition-colors duration-150 bg-blue-100 text-blue-700 hover:bg-blue-200">
                   {copiedToken === e.token ? '✅ Copiato!' : '🔗 Link'}
                 </button>
+                <button
+                  onClick={() => cancellaEmployee(e)}
+                  className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-600 hover:bg-red-200 transition-colors duration-150">
+                  🗑
+                </button>
               </div>
             ))}
           </div>
+
+          {/* Cestino */}
+          {cestino.length > 0 && (
+            <div className="mt-4 border-t pt-3">
+              <button
+                onClick={() => setShowCestino(v => !v)}
+                className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1">
+                🗑 Cestino ({cestino.length}) {showCestino ? '▲' : '▼'}
+              </button>
+              {showCestino && (
+                <div className="mt-2 space-y-1">
+                  {cestino.map(e => (
+                    <div key={e.id} className="flex items-center gap-2 bg-red-50 rounded-lg px-3 py-2 text-sm">
+                      <span className="text-gray-500 line-through">{e.nome}</span>
+                      <span className="text-gray-400 text-xs">{e.ore_settimanali}h</span>
+                      <button
+                        onClick={() => ripristinaEmployee(e)}
+                        className="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700 hover:bg-green-200 ml-auto">
+                        Ripristina
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    onClick={svuotaCestino}
+                    className="mt-2 text-xs text-red-600 hover:text-red-800 font-medium border border-red-200 rounded px-3 py-1 hover:bg-red-50">
+                    🗑 Svuota cestino (elimina definitivamente)
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Tabella turni */}
