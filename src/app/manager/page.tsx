@@ -289,10 +289,10 @@ export default function ManagerPage() {
 
         {/* Selettore mese */}
         <div className="flex gap-3 mb-6 items-center flex-wrap">
-          <select className="border rounded px-3 py-2" value={mese} onChange={e => setMese(+e.target.value)}>
+          <select className="border rounded px-3 py-2 bg-white text-gray-800" value={mese} onChange={e => setMese(+e.target.value)}>
             {MESI.map((m, i) => <option key={i} value={i+1}>{m}</option>)}
           </select>
-          <select className="border rounded px-3 py-2" value={anno} onChange={e => setAnno(+e.target.value)}>
+          <select className="border rounded px-3 py-2 bg-white text-gray-800" value={anno} onChange={e => setAnno(+e.target.value)}>
             {[2025,2026,2027].map(a => <option key={a} value={a}>{a}</option>)}
           </select>
 
@@ -511,7 +511,7 @@ export default function ManagerPage() {
                 <div className="space-y-2">
                   {empUnavs.sort((a,b) => a.data.localeCompare(b.data)).map(u => {
                     const dt = new Date(u.data + 'T00:00:00')
-                    const label = `${dt.getDate()} ${MESI[dt.getMonth() + 1]}`
+                    const label = `${dt.getDate()} ${MESI[dt.getMonth()]}`
                     return (
                       <div key={u.id} className="flex items-start gap-3 py-2 border-b last:border-0">
                         <span className="font-medium text-gray-700 min-w-20">{label}</span>
