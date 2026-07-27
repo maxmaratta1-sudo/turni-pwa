@@ -12,7 +12,7 @@ const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
   domenica_lungo: 'domenica_lungo', domenica_corto: 'domenica_corto',
 }
 const TURNO_LABEL: Record<string, string> = {
-  mattina: 'M', pomeriggio: 'P', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC'
+  mattina: 'M', pomeriggio: 'Pm', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC'
 }
 const TURNO_COLOR: Record<string, string> = {
   mattina: 'bg-blue-100 text-blue-800',
@@ -224,7 +224,7 @@ export default function ManagerPage() {
     const body = employees.map(emp => [
       emp.nome,
       ...giorni.map(g => {
-        if (hasUnavailability(emp.id, g.data)) return 'P'
+        if (hasUnavailability(emp.id, g.data)) return 'PR'
         const shift = getShift(emp.id, g.data)
         return TURNO_LABEL[shift?.tipo || 'riposo']
       })
@@ -241,9 +241,11 @@ export default function ManagerPage() {
         if (data.section === 'body' && data.column.index > 0) {
           const val = data.cell.raw as string
           if (val === 'M') data.cell.styles.fillColor = [219, 234, 254]
-          else if (val === 'P' && data.column.index > 0) data.cell.styles.fillColor = [254, 243, 199]
+          else if (val === 'Pm') data.cell.styles.fillColor = [254, 237, 213]
+          else if (val === 'PR') data.cell.styles.fillColor = [254, 243, 199]
           else if (val === 'F') data.cell.styles.fillColor = [220, 252, 231]
           else if (val === '—') data.cell.styles.fillColor = [243, 244, 246]
+          else if (val === 'DL' || val === 'DC') data.cell.styles.fillColor = [237, 233, 254]
         }
       }
     })
@@ -520,9 +522,9 @@ export default function ManagerPage() {
                             <button
                               onClick={() => !domenicaBloccata && cycleShift(emp.id, g.data)}
                               disabled={domenicaBloccata}
-                              title="Permesso"
+                              title="Permesso Richiesto"
                               className="inline-block px-1 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-800 hover:opacity-80 disabled:cursor-not-allowed">
-                              P
+                              PR
                             </button>
                           </td>
                         )
@@ -546,10 +548,10 @@ export default function ManagerPage() {
             </table>
             <div className="p-3 text-xs text-gray-400 flex gap-4 flex-wrap">
               <span><strong>M</strong> = Mattina {isMD ? '8-14' : '9-14'}</span>
-              <span><strong>P</strong> = Pomeriggio 14-20</span>
+              <span><strong>Pm</strong> = Pomeriggio 14-20</span>
               <span><strong>F</strong> = Full {isMD ? '8-20' : '9-20'}</span>
               <span><strong>—</strong> = Riposo</span>
-              <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
+              <span><strong className="text-yellow-700">PR</strong><span className="text-yellow-700"> = Permesso Richiesto</span></span>
               {isMD && <span><strong className="text-purple-700">DL</strong><span className="text-purple-700"> = Domenica lungo 8-13</span></span>}
               {isMD && <span><strong className="text-purple-700">DC</strong><span className="text-purple-700"> = Domenica corto 10-13</span></span>}
             </div>
