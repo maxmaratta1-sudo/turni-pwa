@@ -11,6 +11,10 @@ export async function POST(req: NextRequest) {
     .from('schedules').select('*').eq('id', schedule_id).single()
   if (!schedule) return NextResponse.json({ error: 'Schedule not found' }, { status: 404 })
 
+  // Carica store (per selezionare l'algoritmo giusto — MD Lanciano vs default)
+  const { data: store } = await supabaseAdmin
+    .from('stores').select('nome').eq('id', schedule.store_id).single()
+
   // Carica dipendenti
   const { data: employees } = await supabaseAdmin
     .from('employees').select('*').eq('store_id', schedule.store_id).eq('attivo', true)
@@ -28,7 +32,8 @@ export async function POST(req: NextRequest) {
     employees: employees || [],
     unavailabilities: unavailabilities || [],
     mese: schedule.mese,
-    anno: schedule.anno
+    anno: schedule.anno,
+    storeNome: store?.nome,
   })
 
   // Inserisce

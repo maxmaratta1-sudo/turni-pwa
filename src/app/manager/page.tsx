@@ -2,21 +2,45 @@
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { Employee, Schedule, Shift, TurnoTipo } from '@/types'
+import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME } from '@/types'
 
 const MESI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
                'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre']
 const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
-  mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina'
+  mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina',
+  domenica_lungo: 'domenica_lungo', domenica_corto: 'domenica_corto',
 }
 const TURNO_LABEL: Record<string, string> = {
-  mattina: 'M', pomeriggio: 'P', full: 'F', riposo: '—'
+  mattina: 'M', pomeriggio: 'P', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC'
 }
 const TURNO_COLOR: Record<string, string> = {
   mattina: 'bg-blue-100 text-blue-800',
   pomeriggio: 'bg-orange-100 text-orange-800',
   full: 'bg-green-100 text-green-800',
-  riposo: 'bg-gray-100 text-gray-400'
+  riposo: 'bg-gray-100 text-gray-400',
+  domenica_lungo: 'bg-purple-100 text-purple-800',
+  domenica_corto: 'bg-purple-100 text-purple-800',
+}
+
+/** Prossimo turno nel ciclo di click — comportamento diverso per MD Lanciano (turni fissi, domenica attiva). */
+function nextTurno(current: TurnoTipo, emp: Employee, isDomenica: boolean, isMD: boolean): TurnoTipo {
+  if (!isMD) return TURNO_CYCLE[current] // Stroili — invariato
+
+  if (isDomenica) {
+    const cycle: Partial<Record<TurnoTipo, TurnoTipo>> = {
+      riposo: 'domenica_lungo', domenica_lungo: 'domenica_corto', domenica_corto: 'riposo',
+    }
+    return cycle[current] ?? 'domenica_lungo'
+  }
+
+  // Gilda/Tony: turno fisso mattina, il click non li sposta mai in pomeriggio
+  if (emp.turno_fisso === 'mattina') return 'mattina'
+
+  const cycle: Partial<Record<TurnoTipo, TurnoTipo>> = {
+    mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina',
+    domenica_lungo: 'mattina', domenica_corto: 'mattina',
+  }
+  return cycle[current] ?? 'mattina'
 }
 
 interface Unavailability {
@@ -47,6 +71,7 @@ export default function ManagerPage() {
   const [dettaglioEmp, setDettaglioEmp] = useState<Employee | null>(null)
 
   const giorni = getDays(anno, mese)
+  const isMD = storeNome === MD_LANCIANO_STORE_NOME
 
   useEffect(() => {
     const id = localStorage.getItem('turni_store_id')
@@ -178,7 +203,7 @@ export default function ManagerPage() {
 
     const nomeMese = MESI[mese - 1]
     doc.setFontSize(14)
-    doc.text(`Turni ${nomeMese} ${anno} — Stroili Oasi Lanciano`, 14, 14)
+    doc.text(`Turni ${nomeMese} ${anno} — ${storeNome || 'Negozio'}`, 14, 14)
 
     const head = [['Dipendente', ...giorni.map(g => `${g.num}\n${g.giorno}`)]]
     const body = employees.map(emp => [
@@ -217,9 +242,12 @@ export default function ManagerPage() {
 
   async function cycleShift(empId: string, data: string) {
     if (!schedule) return
+    const emp = employees.find(e => e.id === empId)
+    if (!emp) return
+    const isDomenica = giorni.find(g => g.data === data)?.domenica ?? false
     const existing = getShift(empId, data)
     const currentTipo: TurnoTipo = (existing?.tipo as TurnoTipo) ?? 'riposo'
-    const nextTipo = TURNO_CYCLE[currentTipo]
+    const nextTipo = nextTurno(currentTipo, emp, isDomenica, isMD)
 
     // Aggiornamento ottimistico
     if (existing) {
@@ -334,9 +362,22 @@ export default function ManagerPage() {
               value={newEmp.nome} onChange={e => setNewEmp({...newEmp, nome: e.target.value})} />
             <select className="border rounded px-3 py-2"
               value={newEmp.ore_settimanali} onChange={e => setNewEmp({...newEmp, ore_settimanali: +e.target.value})}>
-              <option value={20}>20h/sett</option>
-              <option value={30}>30h/sett</option>
-              <option value={40}>40h/sett</option>
+              {isMD ? (
+                <>
+                  <option value={22}>22h/sett</option>
+                  <option value={28}>28h/sett</option>
+                  <option value={30}>30h/sett</option>
+                  <option value={35}>35h/sett</option>
+                  <option value={36}>36h/sett</option>
+                  <option value={46}>46h/sett</option>
+                </>
+              ) : (
+                <>
+                  <option value={20}>20h/sett</option>
+                  <option value={30}>30h/sett</option>
+                  <option value={40}>40h/sett</option>
+                </>
+              )}
             </select>
             <button onClick={addEmployee} className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700">
               + Aggiungi
@@ -416,20 +457,24 @@ export default function ManagerPage() {
                         onClick={() => setDettaglioEmp(emp)}
                         className="text-left hover:text-blue-600 transition-colors">
                         <div>{emp.nome}</div>
-                        <div className="text-xs text-gray-400">{emp.ore_settimanali}h</div>
+                        <div className="text-xs text-gray-400">
+                          {emp.ore_settimanali}h{isMD && emp.ruolo ? ` • ${emp.ruolo === 'cassiere' ? 'cassiere' : 'non cassiere'}` : ''}
+                        </div>
                       </button>
                     </td>
                     {giorni.map(g => {
                       const shift = getShift(emp.id, g.data)
                       const tipo = shift?.tipo || 'riposo'
                       const isPermesso = hasUnavailability(emp.id, g.data)
+                      const domenicaBloccata = g.domenica && !isMD
+                      const cellBg = g.domenica ? (isMD ? 'bg-purple-50' : 'bg-red-50') : ''
 
                       if (isPermesso && tipo === 'riposo') {
                         return (
-                          <td key={g.data} className={`p-1 text-center ${g.domenica ? 'bg-red-50' : ''}`}>
+                          <td key={g.data} className={`p-1 text-center ${cellBg}`}>
                             <button
-                              onClick={() => !g.domenica && cycleShift(emp.id, g.data)}
-                              disabled={g.domenica}
+                              onClick={() => !domenicaBloccata && cycleShift(emp.id, g.data)}
+                              disabled={domenicaBloccata}
                               title="Permesso"
                               className="inline-block px-1 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-800 hover:opacity-80 disabled:cursor-not-allowed">
                               P
@@ -439,10 +484,10 @@ export default function ManagerPage() {
                       }
 
                       return (
-                        <td key={g.data} className={`p-1 text-center ${g.domenica ? 'bg-red-50' : ''}`}>
+                        <td key={g.data} className={`p-1 text-center ${cellBg}`}>
                           <button
-                            onClick={() => !g.domenica && cycleShift(emp.id, g.data)}
-                            disabled={g.domenica}
+                            onClick={() => !domenicaBloccata && cycleShift(emp.id, g.data)}
+                            disabled={domenicaBloccata}
                             title={`Click per cambiare (attuale: ${tipo})`}
                             className={`inline-block px-1 py-0.5 rounded text-xs font-bold hover:opacity-80 disabled:cursor-not-allowed ${TURNO_COLOR[tipo]}`}>
                             {TURNO_LABEL[tipo]}
@@ -455,11 +500,13 @@ export default function ManagerPage() {
               </tbody>
             </table>
             <div className="p-3 text-xs text-gray-400 flex gap-4 flex-wrap">
-              <span><strong>M</strong> = Mattina 9-14</span>
+              <span><strong>M</strong> = Mattina {isMD ? '8-14' : '9-14'}</span>
               <span><strong>P</strong> = Pomeriggio 14-20</span>
-              <span><strong>F</strong> = Full 9-20</span>
+              <span><strong>F</strong> = Full {isMD ? '8-20' : '9-20'}</span>
               <span><strong>—</strong> = Riposo</span>
               <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
+              {isMD && <span><strong className="text-purple-700">DL</strong><span className="text-purple-700"> = Domenica lungo 8-13</span></span>}
+              {isMD && <span><strong className="text-purple-700">DC</strong><span className="text-purple-700"> = Domenica corto 10-13</span></span>}
             </div>
           </div>
         )}
