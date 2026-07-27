@@ -90,6 +90,12 @@ export default function ManagerPage() {
 
   useEffect(() => { if (storeId) loadData() }, [mese, anno, storeId])
 
+  // Ricarica i turni quando Maia ne modifica uno via tool calling
+  useEffect(() => {
+    window.addEventListener('maiaShiftUpdated', loadData)
+    return () => window.removeEventListener('maiaShiftUpdated', loadData)
+  }, [loadData])
+
   // Seed del modal indisponibilità quando si apre per un dipendente
   useEffect(() => {
     if (!dettaglioEmp) return
@@ -638,6 +644,8 @@ export default function ManagerPage() {
       <MaiaChatBubble
         isMD={isMD}
         storeNome={storeNome}
+        storeId={storeId}
+        scheduleId={schedule?.id ?? null}
         employees={employees}
         shifts={shifts}
         giorni={giorni}

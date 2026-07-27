@@ -1,15 +1,147 @@
 // src/app/api/maia-chat/route.ts
-// Proxy server-side per la chat "Maia — Turni Manager".
+// Proxy server-side per la chat "Maia — Turni Manager", con tool calling per
+// modificare i turni direttamente da Supabase.
 // La chiave ANTHROPIC_API_KEY resta SEMPRE lato server — mai esposta al client
 // (una chiamata diretta dal browser richiederebbe NEXT_PUBLIC_..., che pubblica
 // la chiave nel bundle JS: inaccettabile per una API key segreta).
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { supabaseAdmin } from '@/lib/supabase'
+import { ORARI_TURNO_MD, TurnoTipo } from '@/types'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
+const tools: Anthropic.Tool[] = [
+  {
+    name: 'update_shift',
+    description: 'Modifica il turno di un dipendente in una data specifica',
+    input_schema: {
+      type: 'object',
+      properties: {
+        employee_name: { type: 'string', description: 'Nome del dipendente' },
+        data: { type: 'string', description: 'Data in formato YYYY-MM-DD' },
+        tipo: { type: 'string', enum: ['mattina', 'pomeriggio', 'full', 'riposo'], description: 'Tipo di turno' },
+      },
+      required: ['employee_name', 'data', 'tipo'],
+    },
+  },
+  {
+    name: 'update_shift_week',
+    description: 'Modifica il turno di un dipendente per tutta una settimana o più giorni consecutivi',
+    input_schema: {
+      type: 'object',
+      properties: {
+        employee_name: { type: 'string' },
+        data_inizio: { type: 'string', description: 'Data inizio YYYY-MM-DD' },
+        data_fine: { type: 'string', description: 'Data fine YYYY-MM-DD' },
+        tipo: { type: 'string', enum: ['mattina', 'pomeriggio', 'full', 'riposo'] },
+      },
+      required: ['employee_name', 'data_inizio', 'data_fine', 'tipo'],
+    },
+  },
+  {
+    name: 'get_employee_shifts',
+    description: 'Recupera i turni di un dipendente per il mese corrente',
+    input_schema: {
+      type: 'object',
+      properties: {
+        employee_name: { type: 'string' },
+      },
+      required: ['employee_name'],
+    },
+  },
+]
+
+interface ToolCtx {
+  storeId: string
+  scheduleId: string
+}
+
+async function findEmployee(nome: string, storeId: string) {
+  const { data, error } = await supabaseAdmin
+    .from('employees')
+    .select('id, nome')
+    .eq('store_id', storeId)
+    .ilike('nome', nome)
+    .maybeSingle()
+  if (error || !data) return null
+  return data
+}
+
+async function upsertShift(scheduleId: string, employeeId: string, data: string, tipo: TurnoTipo) {
+  const orario = tipo !== 'riposo' ? ORARI_TURNO_MD[tipo] : null
+  return supabaseAdmin.from('shifts').upsert(
+    {
+      schedule_id: scheduleId,
+      employee_id: employeeId,
+      data,
+      tipo,
+      ora_inizio: orario?.inizio ?? null,
+      ora_fine: orario?.fine ?? null,
+    },
+    { onConflict: 'schedule_id,employee_id,data' }
+  )
+}
+
+function eachDate(start: string, end: string): string[] {
+  const dates: string[] = []
+  const d = new Date(start + 'T00:00:00')
+  const last = new Date(end + 'T00:00:00')
+  while (d <= last) {
+    const yyyy = d.getFullYear()
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const dd = String(d.getDate()).padStart(2, '0')
+    dates.push(`${yyyy}-${mm}-${dd}`)
+    d.setDate(d.getDate() + 1)
+  }
+  return dates
+}
+
+async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<string> {
+  if (toolName === 'update_shift') {
+    const emp = await findEmployee(input.employee_name, ctx.storeId)
+    if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
+    const { error } = await upsertShift(ctx.scheduleId, emp.id, input.data, input.tipo)
+    if (error) return `Errore salvataggio turno: ${error.message}`
+    return `OK: turno di ${emp.nome} il ${input.data} impostato su "${input.tipo}".`
+  }
+
+  if (toolName === 'update_shift_week') {
+    const emp = await findEmployee(input.employee_name, ctx.storeId)
+    if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
+    const dates = eachDate(input.data_inizio, input.data_fine)
+    const isDomenicaTipo = input.tipo === 'domenica_lungo' || input.tipo === 'domenica_corto'
+    let modificati = 0
+    let saltati = 0
+    for (const d of dates) {
+      const dayOfWeek = new Date(d + 'T00:00:00').getDay()
+      if (dayOfWeek === 0 && !isDomenicaTipo) { saltati++; continue }
+      const { error } = await upsertShift(ctx.scheduleId, emp.id, d, input.tipo)
+      if (!error) modificati++
+    }
+    return `OK: turno di ${emp.nome} impostato su "${input.tipo}" per ${modificati} giorni (${input.data_inizio} → ${input.data_fine})${saltati > 0 ? `, ${saltati} domeniche escluse` : ''}.`
+  }
+
+  if (toolName === 'get_employee_shifts') {
+    const emp = await findEmployee(input.employee_name, ctx.storeId)
+    if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
+    const { data: shifts, error } = await supabaseAdmin
+      .from('shifts')
+      .select('data, tipo')
+      .eq('schedule_id', ctx.scheduleId)
+      .eq('employee_id', emp.id)
+      .order('data', { ascending: true })
+    if (error) return `Errore lettura turni: ${error.message}`
+    if (!shifts || shifts.length === 0) return `${emp.nome} non ha turni generati per questo mese.`
+    const righe = shifts.map(s => `${s.data}: ${s.tipo}`).join('\n')
+    return `Turni di ${emp.nome}:\n${righe}`
+  }
+
+  return `Errore: tool "${toolName}" non riconosciuto.`
+}
+
 export async function POST(req: NextRequest) {
-  const { messages, context, mese, anno } = await req.json()
+  const { messages, context, mese, anno, storeId, scheduleId } = await req.json()
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return NextResponse.json({ error: 'messages richiesto' }, { status: 400 })
@@ -36,29 +168,60 @@ Conosci queste regole del negozio:
 - Fascia 14-16: Yuri deve essere sempre presente
 - Fascia 08-13 e 17-20: minimo 3 cassieri
 - Gilda e Tony: sempre mattina, non fanno cassa
-- Max e Carlo: si alternano mattina/pomeriggio a settimane alterne
+- Max e Romeo: si alternano mattina/pomeriggio a settimane alterne
 - Le 22h (Marilena, Angelica, Elisa, Damiana): 2 mattina + 2 pomeriggio
 - Priorità cassa: 22h prime, poi 28h, poi 30h, poi 35h/46h
 
 ${context ?? ''}
 
-Rispondi sempre in italiano, in modo conciso e pratico. Puoi suggerire modifiche ai turni, avvisare di problemi di copertura, rispondere a domande sui dipendenti e sui giorni specifici.`
+Rispondi sempre in italiano, in modo conciso e pratico. Puoi suggerire modifiche ai turni, avvisare di problemi di copertura, rispondere a domande sui dipendenti e sui giorni specifici.
+Se il manager ti chiede di modificare un turno, usa i tool a disposizione invece di limitarti a descrivere la modifica — solo così viene salvata davvero.`
+
+  const canUseTools = !!storeId && !!scheduleId
 
   try {
-    const response = await anthropic.messages.create({
+    const anthropicMessages: Anthropic.MessageParam[] = messages.map((m: { role: 'user' | 'assistant'; content: string }) => ({
+      role: m.role,
+      content: m.content,
+    }))
+
+    let response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       system,
-      messages: messages.map((m: { role: 'user' | 'assistant'; content: string }) => ({
-        role: m.role,
-        content: m.content,
-      })),
+      messages: anthropicMessages,
+      ...(canUseTools ? { tools } : {}),
     })
+
+    let toolUsed = false
+
+    // Loop finché Claude continua a chiedere tool_use (max 5 iterazioni di sicurezza)
+    for (let i = 0; i < 5 && response.stop_reason === 'tool_use'; i++) {
+      const toolUseBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]
+
+      anthropicMessages.push({ role: 'assistant', content: response.content })
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = []
+      for (const block of toolUseBlocks) {
+        toolUsed = true
+        const result = await executeTool(block.name, block.input, { storeId, scheduleId })
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
+      }
+      anthropicMessages.push({ role: 'user', content: toolResults })
+
+      response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        system,
+        messages: anthropicMessages,
+        ...(canUseTools ? { tools } : {}),
+      })
+    }
 
     const textBlock = response.content.find(b => b.type === 'text')
     const reply = textBlock && textBlock.type === 'text' ? textBlock.text : ''
 
-    return NextResponse.json({ reply })
+    return NextResponse.json({ reply, shiftsUpdated: toolUsed })
   } catch (err: any) {
     console.error('[maia-chat] Anthropic error:', err)
     return NextResponse.json({ error: err?.message ?? 'Errore chiamata Maia' }, { status: 500 })

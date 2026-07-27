@@ -7,6 +7,8 @@ interface Msg { role: 'user' | 'assistant'; content: string }
 interface Props {
   isMD: boolean
   storeNome: string
+  storeId: string | null
+  scheduleId: string | null
   employees: Employee[]
   shifts: Shift[]
   giorni: { data: string }[]
@@ -41,7 +43,7 @@ function buildContext(employees: Employee[], shifts: Shift[], giorni: { data: st
  * prompt è specifico per quel negozio, non ha senso mostrarla ad altri store (Stroili).
  * La chiamata ad Anthropic passa sempre da /api/maia-chat: la chiave resta server-side.
  */
-export default function MaiaChatBubble({ isMD, storeNome, employees, shifts, giorni, mese, anno }: Props) {
+export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, employees, shifts, giorni, mese, anno }: Props) {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Msg[]>([])
   const [input, setInput] = useState('')
@@ -61,10 +63,13 @@ export default function MaiaChatBubble({ isMD, storeNome, employees, shifts, gio
       const res = await fetch('/api/maia-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: nextMessages, context: buildContext(employees, shifts, giorni), mese, anno }),
+        body: JSON.stringify({ messages: nextMessages, context: buildContext(employees, shifts, giorni), mese, anno, storeId, scheduleId }),
       })
       const data = await res.json()
       setMessages(prev => [...prev, { role: 'assistant', content: data.reply || `⚠️ ${data.error ?? 'Errore'}` }])
+      if (data.shiftsUpdated) {
+        window.dispatchEvent(new CustomEvent('maiaShiftUpdated'))
+      }
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: '⚠️ Errore di connessione.' }])
     }
