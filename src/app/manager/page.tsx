@@ -64,6 +64,7 @@ export default function ManagerPage() {
   const [unavailabilities, setUnavailabilities] = useState<Unavailability[]>([])
   const [loading, setLoading] = useState(false)
   const [newEmp, setNewEmp] = useState({ nome: '', ore_settimanali: 20 })
+  const [showAddForm, setShowAddForm] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copiedToken, setCopiedToken] = useState<string | null>(null)
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -172,6 +173,7 @@ export default function ManagerPage() {
       body: JSON.stringify({ ...newEmp, store_id: storeId! })
     })
     setNewEmp({ nome: '', ore_settimanali: 20 })
+    setShowAddForm(false)
     loadData()
   }
 
@@ -404,36 +406,47 @@ export default function ManagerPage() {
           )}
         </div>
 
-        {/* Aggiungi dipendente */}
+        {/* Dipendenti */}
         <div className="bg-white rounded-xl shadow-sm p-4 mb-6">
-          <h2 className="font-semibold text-gray-700 mb-3">👤 Dipendenti</h2>
-          <div className="flex gap-3 mb-4 flex-wrap">
-            <input type="text" placeholder="Nome dipendente"
-              className="border rounded px-3 py-2 flex-1 min-w-48"
-              value={newEmp.nome} onChange={e => setNewEmp({...newEmp, nome: e.target.value})} />
-            <select className="border rounded px-3 py-2"
-              value={newEmp.ore_settimanali} onChange={e => setNewEmp({...newEmp, ore_settimanali: +e.target.value})}>
-              {isMD ? (
-                <>
-                  <option value={22}>22h/sett</option>
-                  <option value={28}>28h/sett</option>
-                  <option value={30}>30h/sett</option>
-                  <option value={35}>35h/sett</option>
-                  <option value={36}>36h/sett</option>
-                  <option value={46}>46h/sett</option>
-                </>
-              ) : (
-                <>
-                  <option value={20}>20h/sett</option>
-                  <option value={30}>30h/sett</option>
-                  <option value={40}>40h/sett</option>
-                </>
-              )}
-            </select>
-            <button onClick={addEmployee} className="bg-gray-800 text-white px-4 py-2 rounded hover:bg-gray-700">
-              + Aggiungi
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-gray-700">👤 Dipendenti</h2>
+            <button
+              onClick={() => setShowAddForm(v => !v)}
+              className="text-xs text-gray-400 hover:text-gray-600 transition-colors">
+              {showAddForm ? 'Annulla' : '+ Aggiungi dipendente'}
             </button>
           </div>
+
+          {showAddForm && (
+            <div className="flex gap-3 mb-4 flex-wrap items-center bg-gray-50 rounded-lg p-3">
+              <input type="text" placeholder="Nome dipendente"
+                className="border rounded px-3 py-2 flex-1 min-w-48 text-sm"
+                value={newEmp.nome} onChange={e => setNewEmp({...newEmp, nome: e.target.value})} />
+              <select className="border rounded px-3 py-2 text-sm"
+                value={newEmp.ore_settimanali} onChange={e => setNewEmp({...newEmp, ore_settimanali: +e.target.value})}>
+                {isMD ? (
+                  <>
+                    <option value={22}>22h/sett</option>
+                    <option value={28}>28h/sett</option>
+                    <option value={30}>30h/sett</option>
+                    <option value={35}>35h/sett</option>
+                    <option value={36}>36h/sett</option>
+                    <option value={46}>46h/sett</option>
+                  </>
+                ) : (
+                  <>
+                    <option value={20}>20h/sett</option>
+                    <option value={30}>30h/sett</option>
+                    <option value={40}>40h/sett</option>
+                  </>
+                )}
+              </select>
+              <button onClick={addEmployee} className="bg-gray-800 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
+                Aggiungi
+              </button>
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-2">
             {employees.map(e => (
               <div key={e.id}
