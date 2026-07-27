@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 
 export default function LoginPage() {
@@ -9,6 +9,12 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null)
   const [showPassword, setShowPassword] = useState(false)
   const [loading, setLoading] = useState(false)
+
+  // Forza campi vuoti anche se il browser prova ad autocompilare con credenziali salvate
+  useEffect(() => {
+    setEmail('')
+    setPassword('')
+  }, [])
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
@@ -46,12 +52,16 @@ export default function LoginPage() {
             <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
             <input
               type="text"
-              autoComplete="username"
+              name="turni-login-email"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               required
               value={email}
               onChange={e => setEmail(e.target.value)}
               className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              placeholder="adele-gioielleria.it"
+              placeholder="email@negozio.it"
             />
           </div>
           <div>
@@ -59,7 +69,8 @@ export default function LoginPage() {
             <div className="relative">
               <input
                 type={showPassword ? 'text' : 'password'}
-                autoComplete="current-password"
+                name="turni-login-password"
+                autoComplete="off"
                 required
                 value={password}
                 onChange={e => setPassword(e.target.value)}

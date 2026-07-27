@@ -36,6 +36,24 @@ ALTER TABLE shifts DROP CONSTRAINT IF EXISTS shifts_tipo_check;
 ALTER TABLE shifts ADD CONSTRAINT shifts_tipo_check
   CHECK (tipo IN ('mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto'));
 
+-- 4bis. CLEANUP — rimuove la riga "Gilda" placeholder creata a mano dalla UI
+-- (20h, ruolo default, nessun turno_fisso) PRIMA che questo script esistesse.
+-- Questa riga aveva bloccato l'inserimento dei 12 dipendenti reali al primo run
+-- (il guard "IF NOT EXISTS" allo step 5 vedeva già 1 riga e saltava tutto).
+-- Cascade: elimina anche i 31 turni + 1 permesso di test già generati per quella riga.
+DO $$
+DECLARE
+  md_store_id UUID;
+BEGIN
+  SELECT id INTO md_store_id FROM stores WHERE nome = 'MD Lanciano' LIMIT 1;
+
+  DELETE FROM employees
+  WHERE store_id = md_store_id
+    AND nome = 'Gilda'
+    AND ore_settimanali = 20
+    AND turno_fisso IS NULL;
+END $$;
+
 -- 5. Dipendenti MD Lanciano — ESEGUI UNA SOLA VOLTA.
 -- Non esiste un vincolo UNIQUE su (store_id, nome): un secondo run duplicherebbe i 12 dipendenti.
 DO $$
