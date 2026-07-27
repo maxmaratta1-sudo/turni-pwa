@@ -228,7 +228,10 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
         const orePerGiorno = oreRimanenti / giorniLavorativiRimanenti
         tipo = orePerGiorno >= 8 ? 'full' : 'mattina'
       }
-      // R2 — Alternanza Max/Carlo (gruppo AB), a settimane alterne
+      // R2 — Alternanza Max/Romeo (gruppo AB), a settimane alterne
+      // NOTA: Carlo NON fa parte dell'alternanza — viene assegnato liberamente
+      // dal ramo greedy in base alle ore rimanenti (non ha turno_fisso,
+      // alternanza_gruppo, né priorita_cassa 1/2, quindi cade nel ramo "else" sotto).
       else if (emp.alternanza_gruppo === 'AB') {
         const isMax = emp.nome === 'Max'
         const mattinaOra = weekIsEven ? isMax : !isMax
@@ -269,7 +272,7 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
   return shifts
 }
 
-/** Numero di settimana ISO (usato per l'alternanza settimanale Max/Carlo e 28h). */
+/** Numero di settimana ISO (usato per l'alternanza settimanale Max/Romeo e 28h). */
 function getIsoWeek(date: Date): number {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
   const dayNum = d.getUTCDay() || 7
