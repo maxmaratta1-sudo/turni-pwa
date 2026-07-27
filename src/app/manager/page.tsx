@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME } from '@/types'
+import MaiaChatBubble from '@/components/MaiaChatBubble'
 
 const MESI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
                'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre']
@@ -69,6 +70,10 @@ export default function ManagerPage() {
   const [cestino, setCestino] = useState<Employee[]>([])
   const [showCestino, setShowCestino] = useState(false)
   const [dettaglioEmp, setDettaglioEmp] = useState<Employee | null>(null)
+  const [modalSelected, setModalSelected] = useState<Set<string>>(new Set())
+  const [modalMotivo, setModalMotivo] = useState('')
+  const [modalSaved, setModalSaved] = useState(false)
+  const [modalSaving, setModalSaving] = useState(false)
 
   const giorni = getDays(anno, mese)
   const isMD = storeNome === MD_LANCIANO_STORE_NOME
@@ -84,6 +89,16 @@ export default function ManagerPage() {
   }, [])
 
   useEffect(() => { if (storeId) loadData() }, [mese, anno, storeId])
+
+  // Seed del modal indisponibilità quando si apre per un dipendente
+  useEffect(() => {
+    if (!dettaglioEmp) return
+    const dates = unavailabilities.filter(u => u.employee_id === dettaglioEmp.id).map(u => u.data)
+    setModalSelected(new Set(dates))
+    const firstMotivo = unavailabilities.find(u => u.employee_id === dettaglioEmp.id)?.motivo
+    setModalMotivo(firstMotivo ?? '')
+    setModalSaved(false)
+  }, [dettaglioEmp])
 
   async function loadData() {
     setLoading(true)
@@ -240,6 +255,34 @@ export default function ManagerPage() {
     return unavailabilities.some(u => u.employee_id === empId && u.data === data)
   }
 
+  function toggleModalDate(data: string) {
+    const next = new Set(modalSelected)
+    if (next.has(data)) next.delete(data)
+    else next.add(data)
+    setModalSelected(next)
+    setModalSaved(false)
+  }
+
+  async function salvaIndisponibilitaModal() {
+    if (!dettaglioEmp || !schedule) return
+    setModalSaving(true)
+    const res = await fetch('/api/unavailabilities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: dettaglioEmp.token,
+        schedule_id: schedule.id,
+        dates: Array.from(modalSelected),
+        motivo: modalMotivo,
+      }),
+    })
+    setModalSaving(false)
+    if (res.ok) {
+      setModalSaved(true)
+      await loadData()
+    }
+  }
+
   async function cycleShift(empId: string, data: string) {
     if (!schedule) return
     const emp = employees.find(e => e.id === empId)
@@ -385,16 +428,18 @@ export default function ManagerPage() {
           </div>
           <div className="flex flex-wrap gap-2">
             {employees.map(e => (
-              <div key={e.id} className="flex items-center gap-2 bg-gray-100 rounded-lg px-3 py-2 text-sm">
-                <button onClick={() => setDettaglioEmp(e)} className="font-medium hover:text-blue-600 transition-colors">{e.nome}</button>
+              <div key={e.id}
+                onClick={() => setDettaglioEmp(e)}
+                className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 rounded-lg px-3 py-2 text-sm cursor-pointer transition-colors">
+                <button onClick={ev => { ev.stopPropagation(); setDettaglioEmp(e) }} className="font-medium hover:text-blue-600 transition-colors">{e.nome}</button>
                 <span className="text-gray-500">{e.ore_settimanali}h</span>
                 <button
-                  onClick={() => copyLink(e)}
+                  onClick={ev => { ev.stopPropagation(); copyLink(e) }}
                   className="text-xs px-2 py-0.5 rounded transition-colors duration-150 bg-blue-100 text-blue-700 hover:bg-blue-200">
                   {copiedToken === e.token ? '✅ Copiato!' : '🔗 Link'}
                 </button>
                 <button
-                  onClick={() => cancellaEmployee(e)}
+                  onClick={ev => { ev.stopPropagation(); cancellaEmployee(e) }}
                   className="text-xs px-2 py-0.5 rounded bg-red-100 text-red-600 hover:bg-red-200 transition-colors duration-150">
                   🗑
                 </button>
@@ -539,40 +584,89 @@ export default function ManagerPage() {
         )}
       </div>
 
-      {/* Modal dettaglio permessi dipendente */}
+      {/* Modal indisponibilità dipendente — caricamento diretto dal manager */}
       {dettaglioEmp && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4"
           onClick={() => setDettaglioEmp(null)}>
-          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-md w-full"
+          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto"
             onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <h2 className="font-bold text-gray-800 text-lg">🟡 Permessi — {dettaglioEmp.nome}</h2>
+              <h2 className="font-bold text-gray-800 text-lg">🗓 Indisponibilità — {dettaglioEmp.nome}</h2>
               <button onClick={() => setDettaglioEmp(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
             </div>
-            {(() => {
-              const empUnavs = unavailabilities.filter(u => u.employee_id === dettaglioEmp.id)
-              if (empUnavs.length === 0) return (
-                <p className="text-gray-500 text-sm">Nessun permesso registrato per questo mese.</p>
-              )
-              return (
-                <div className="space-y-2">
-                  {empUnavs.sort((a,b) => a.data.localeCompare(b.data)).map(u => {
-                    const dt = new Date(u.data + 'T00:00:00')
-                    const label = `${dt.getDate()} ${MESI[dt.getMonth()]}`
-                    return (
-                      <div key={u.id} className="flex items-start gap-3 py-2 border-b last:border-0">
-                        <span className="font-medium text-gray-700 min-w-20">{label}</span>
-                        <span className="text-gray-500 text-sm italic">{u.motivo || '—'}</span>
-                      </div>
-                    )
-                  })}
-                  <p className="text-xs text-gray-400 pt-1">Tot: {empUnavs.length} {empUnavs.length === 1 ? 'giorno' : 'giorni'}</p>
+
+            {!schedule ? (
+              <p className="text-gray-500 text-sm">Crea prima il piano del mese per poter registrare le indisponibilità.</p>
+            ) : (
+              <>
+                <p className="text-sm text-gray-600 mb-3">
+                  Seleziona i giorni in cui <strong>{dettaglioEmp.nome}</strong> non è disponibile — {MESI[mese - 1]} {anno}.
+                </p>
+
+                <div className="grid grid-cols-7 gap-1 text-center text-xs text-gray-400 mb-2">
+                  {['L','M','M','G','V','S','D'].map((d, i) => <div key={i}>{d}</div>)}
                 </div>
-              )
-            })()}
+                <ModalCalGrid giorni={giorni} selected={modalSelected} onToggle={toggleModalDate} />
+
+                <div className="mt-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Motivo (opzionale)</label>
+                  <input type="text" placeholder="es. visita medica, impegno familiare..."
+                    className="w-full border rounded-lg px-3 py-2 text-sm"
+                    value={modalMotivo} onChange={e => { setModalMotivo(e.target.value); setModalSaved(false) }} />
+                </div>
+
+                <div className="flex gap-3 mt-5">
+                  <button onClick={() => setDettaglioEmp(null)}
+                    className="flex-1 py-2.5 rounded-lg font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition">
+                    Chiudi
+                  </button>
+                  <button onClick={salvaIndisponibilitaModal} disabled={modalSaving}
+                    className={`flex-1 py-2.5 rounded-lg font-semibold text-white transition disabled:opacity-50 ${
+                      modalSaved ? 'bg-green-500' : 'bg-blue-600 hover:bg-blue-700'
+                    }`}>
+                    {modalSaving ? 'Salvataggio...' : modalSaved ? '✅ Salvato!' : 'Salva'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
+
+      <MaiaChatBubble
+        isMD={isMD}
+        storeNome={storeNome}
+        employees={employees}
+        shifts={shifts}
+        giorni={giorni}
+      />
+    </div>
+  )
+}
+
+/** Calendario a griglia 7 colonne (Lun-Dom) per il modal indisponibilità del manager. */
+function ModalCalGrid({ giorni, selected, onToggle }: {
+  giorni: ReturnType<typeof getDays>,
+  selected: Set<string>,
+  onToggle: (d: string) => void
+}) {
+  if (!giorni.length) return null
+  const firstDay = new Date(giorni[0].data + 'T00:00:00').getDay()
+  const offset = firstDay === 0 ? 6 : firstDay - 1
+
+  return (
+    <div className="grid grid-cols-7 gap-1">
+      {Array(offset).fill(null).map((_, i) => <div key={`e${i}`} />)}
+      {giorni.map(g => (
+        <button key={g.data} onClick={() => !g.domenica && onToggle(g.data)}
+          disabled={g.domenica}
+          className={`aspect-square rounded-lg text-sm font-medium transition flex items-center justify-center
+            ${g.domenica ? 'text-gray-300 cursor-not-allowed' :
+              selected.has(g.data) ? 'bg-red-500 text-white' :
+              'hover:bg-gray-100 text-gray-700'}`}>
+          {g.num}
+        </button>
+      ))}
     </div>
   )
 }
