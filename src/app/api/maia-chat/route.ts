@@ -9,13 +9,25 @@ import Anthropic from '@anthropic-ai/sdk'
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 export async function POST(req: NextRequest) {
-  const { messages, context } = await req.json()
+  const { messages, context, mese, anno } = await req.json()
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return NextResponse.json({ error: 'messages richiesto' }, { status: 400 })
   }
 
+  const oggi = new Date().toLocaleDateString('it-IT', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  })
+  const dataContext = mese && anno
+    ? `Oggi è ${oggi}. Il mese corrente per la pianificazione turni è ${mese}/${anno}.`
+    : `Oggi è ${oggi}.`
+
   const system = `Sei Maia, un'assistente AI specializzata nella gestione dei turni per supermercati e negozi retail in Italia. Stai aiutando il manager del supermercato MD Lanciano.
+
+${dataContext}
 
 Conosci queste regole del negozio:
 - Orario: 08:00-20:00

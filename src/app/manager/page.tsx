@@ -639,6 +639,8 @@ export default function ManagerPage() {
         employees={employees}
         shifts={shifts}
         giorni={giorni}
+        mese={mese}
+        anno={anno}
       />
     </div>
   )

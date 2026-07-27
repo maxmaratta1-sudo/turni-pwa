@@ -10,6 +10,8 @@ interface Props {
   employees: Employee[]
   shifts: Shift[]
   giorni: { data: string }[]
+  mese: number
+  anno: number
 }
 
 const TIPO_LETTER: Record<string, string> = {
@@ -39,7 +41,7 @@ function buildContext(employees: Employee[], shifts: Shift[], giorni: { data: st
  * prompt è specifico per quel negozio, non ha senso mostrarla ad altri store (Stroili).
  * La chiamata ad Anthropic passa sempre da /api/maia-chat: la chiave resta server-side.
  */
-export default function MaiaChatBubble({ isMD, storeNome, employees, shifts, giorni }: Props) {
+export default function MaiaChatBubble({ isMD, storeNome, employees, shifts, giorni, mese, anno }: Props) {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Msg[]>([])
   const [input, setInput] = useState('')
@@ -59,7 +61,7 @@ export default function MaiaChatBubble({ isMD, storeNome, employees, shifts, gio
       const res = await fetch('/api/maia-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: nextMessages, context: buildContext(employees, shifts, giorni) }),
+        body: JSON.stringify({ messages: nextMessages, context: buildContext(employees, shifts, giorni), mese, anno }),
       })
       const data = await res.json()
       setMessages(prev => [...prev, { role: 'assistant', content: data.reply || `⚠️ ${data.error ?? 'Errore'}` }])
