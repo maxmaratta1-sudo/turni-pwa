@@ -603,7 +603,7 @@ export default function ManagerPage() {
         {/* Tabella turni */}
         {shifts.length > 0 && (
           <div className="bg-white rounded-xl shadow-sm overflow-x-auto mb-6">
-            <table className="w-full text-sm">
+            <table className="w-full text-sm" style={{ minWidth: '1800px' }}>
               <thead>
                 <tr className="border-b">
                   <th className="text-left p-3 font-semibold text-gray-700 sticky left-0 bg-white min-w-32">Dipendente</th>
