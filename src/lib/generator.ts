@@ -118,8 +118,14 @@ function getTurnoOrario(tipo: TurnoTipo) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ALGORITMO MD LANCIANO — R1-R9
+// ALGORITMO MD LANCIANO — R1-R7 (domenica ESCLUSA — vedi nota sotto)
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// DOMENICA: non gestita da questo algoritmo. Ogni domenica è sempre "riposo" di
+// default per tutti — i turni domenicali (domenica_lungo/domenica_corto) vengono
+// assegnati SOLO manualmente da Giacomo (click sulla cella o tramite Maia), incluso
+// il relativo riposo compensativo durante la settimana. Vedi system prompt di Maia
+// in src/app/api/maia-chat/route.ts per le regole domenicali complete.
 //
 // NOTE — semplificazioni rispetto alla specifica ideale (documentate esplicitamente):
 // - R6/R7 (copertura minima cassieri fascia 13-16 e chiusura 20:00, min. 3/4 persone):
@@ -136,8 +142,6 @@ function getTurnoOrario(tipo: TurnoTipo) {
 // - R4 (22h): rotazione a coppie tramite (giorno_del_mese + indice) % 4 — garantisce
 //   sempre esattamente 2 mattina + 2 pomeriggio al giorno, e varia la coppia nel tempo,
 //   ma non è una vera equalizzazione stocastica del totale mensile per persona.
-// - Giorno compensativo dopo una domenica lavorata: trattato come riposo pieno in
-//   cella (le ore della domenica riducono comunque correttamente il target mensile).
 //
 function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_at'>[] {
   const { scheduleId, employees, unavailabilities, mese, anno } = params
@@ -156,51 +160,16 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
 
   const cassieri22 = employees.filter(e => e.priorita_cassa === 1)
 
-  // Pool di rotazione domenicale "lungo" — mai Gilda/Tony (turno_fisso 'mattina') né Yuri (R1: dom. riposo)
-  const rotationPool = employees.filter(e => e.nome !== 'Yuri' && e.turno_fisso !== 'mattina').map(e => e.id)
-  let rotationOffset = 0
-  let cassieri22CortoOffset = 0
-
-  // Giorno compensativo pendente: employee_id → true (da consumare come riposo nella settimana)
-  const compensatorioPendente: Record<string, boolean> = {}
-
   for (const giorno of giorni) {
     const dataStr = formatDate(giorno)
     const dayOfWeek = giorno.getDay() // 0=domenica, 1=lunedì ... 6=sabato
     const weekIsEven = getIsoWeek(giorno) % 2 === 0
 
-    // ── R8 — Domenica: 2 domenica_lungo + 1 domenica_corto (sempre una 22h) ──
+    // ── Domenica: riposo per tutti — nessuna assegnazione automatica.
+    // I turni domenicali li assegna solo Giacomo manualmente (cella o Maia).
     if (dayOfWeek === 0) {
-      const workers: { emp: Employee; tipo: TurnoTipo }[] = []
-
-      if (cassieri22.length > 0) {
-        const corto = cassieri22[cassieri22CortoOffset % cassieri22.length]
-        workers.push({ emp: corto, tipo: 'domenica_corto' })
-        cassieri22CortoOffset++
-      }
-
-      const lungoPool = rotationPool.filter(id => !workers.some(w => w.emp.id === id))
-      for (let i = 0; i < 2 && lungoPool.length > 0; i++) {
-        const empId = lungoPool[(rotationOffset + i) % lungoPool.length]
-        const emp = employees.find(e => e.id === empId)
-        if (!emp) continue
-        workers.push({ emp, tipo: 'domenica_lungo' })
-      }
-      rotationOffset = (rotationOffset + 2) % Math.max(lungoPool.length, 1)
-
       for (const emp of employees) {
-        const worker = workers.find(w => w.emp.id === emp.id)
-        if (worker) {
-          const orario = ORARI_TURNO_MD[worker.tipo]!
-          oreAssegnate[emp.id] += ORE_TURNO_MD[worker.tipo]
-          compensatorioPendente[emp.id] = true
-          shifts.push({
-            schedule_id: scheduleId, employee_id: emp.id, data: dataStr, tipo: worker.tipo,
-            ora_inizio: orario.inizio, ora_fine: orario.fine,
-          })
-        } else {
-          shifts.push({ schedule_id: scheduleId, employee_id: emp.id, data: dataStr, tipo: 'riposo' })
-        }
+        shifts.push({ schedule_id: scheduleId, employee_id: emp.id, data: dataStr, tipo: 'riposo' })
       }
       continue
     }
@@ -211,13 +180,6 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
     for (const emp of employees) {
       // Indisponibilità dichiarata → riposo
       if (unavailMap[emp.id]?.has(dataStr)) {
-        shifts.push({ schedule_id: scheduleId, employee_id: emp.id, data: dataStr, tipo: 'riposo' })
-        continue
-      }
-
-      // R8 — giorno compensativo dopo una domenica lavorata
-      if (compensatorioPendente[emp.id]) {
-        delete compensatorioPendente[emp.id]
         shifts.push({ schedule_id: scheduleId, employee_id: emp.id, data: dataStr, tipo: 'riposo' })
         continue
       }
