@@ -33,6 +33,21 @@ const ASSENZA_LABEL: Record<string, string> = {
   PR: 'Permesso Richiesto', FE: 'Ferie', P: 'Permesso', R: 'Recupero', ML: 'Malattia', MT: 'Maternità',
 }
 
+// Orari reali MD Lanciano — mostrati in cella invece delle lettere, SOLO per MD.
+// Stroili conserva le lettere (i suoi orari reali sono 9-14/14-20, diversi da MD).
+const TURNO_ORARIO_MD: Record<string, string> = {
+  mattina: '8/14', pomeriggio: '14/20', full: '8/20',
+  mattina_corta: '8/13', pomeriggio_corto: '14/19',
+  yuri_full: '8/16', yuri_pomeriggio: '13/16',
+  domenica_lungo: '8/13', domenica_corto: '10/13',
+  riposo: '—',
+}
+
+function getTurnoDisplay(tipo: string, isMD: boolean): string {
+  if (isMD) return TURNO_ORARIO_MD[tipo] ?? TURNO_LABEL[tipo] ?? tipo
+  return TURNO_LABEL[tipo] ?? tipo
+}
+
 /** Prossimo turno nel ciclo di click — comportamento diverso per MD Lanciano (turni fissi, domenica attiva). */
 function nextTurno(current: TurnoTipo, emp: Employee, isDomenica: boolean, isMD: boolean): TurnoTipo {
   if (!isMD) return TURNO_CYCLE[current] // Stroili — invariato
@@ -256,7 +271,7 @@ export default function ManagerPage() {
       ...giorniDaEsportare.map(g => {
         if (hasUnavailability(emp.id, g.data)) return getAssenzaCode(emp.id, g.data)
         const shift = getShift(emp.id, g.data)
-        return TURNO_LABEL[shift?.tipo || 'riposo']
+        return getTurnoDisplay(shift?.tipo || 'riposo', isMD)
       })
     ])
 
@@ -270,16 +285,29 @@ export default function ManagerPage() {
       didParseCell: (data) => {
         if (data.section === 'body' && data.column.index > 0) {
           const val = data.cell.raw as string
-          if (val === 'M') data.cell.styles.fillColor = [219, 234, 254]
-          else if (val === 'Pm') data.cell.styles.fillColor = [254, 237, 213]
-          else if (['PR', 'FE', 'P', 'R', 'MT'].includes(val)) data.cell.styles.fillColor = [254, 243, 199]
-          // (ML — Malattia — colorata separatamente sotto)
-          else if (val === 'F') data.cell.styles.fillColor = [220, 252, 231] // turno "full" — 'Ferie' usa 'FE', mai ambiguità
-          else if (val === '—') data.cell.styles.fillColor = [243, 244, 246]
-          else if (val === 'DL' || val === 'DC') data.cell.styles.fillColor = [237, 233, 254]
-          else if (val === 'YF' || val === 'Y') data.cell.styles.fillColor = [191, 219, 254]
-          else if (val === 'M5' || val === 'P5') data.cell.styles.fillColor = [207, 250, 254]
-          else if (val === 'ML') data.cell.styles.fillColor = [254, 226, 226] // Malattia
+          // Assenze — sempre lettera, indipendentemente da MD/Stroili
+          if (['PR', 'FE', 'P', 'R', 'MT'].includes(val)) { data.cell.styles.fillColor = [254, 243, 199]; return }
+          if (val === 'ML') { data.cell.styles.fillColor = [254, 226, 226]; return }
+
+          // Turni — MD mostra orari, Stroili mostra lettere: due mappe di colore separate
+          const colorMD: Record<string, [number, number, number]> = {
+            '8/14': [219, 234, 254],   // mattina
+            '14/20': [254, 237, 213],  // pomeriggio
+            '8/20': [220, 252, 231],   // full
+            '—': [243, 244, 246],      // riposo
+            '8/13': [237, 233, 254],   // domenica_lungo E mattina_corta (Max) condividono l'orario
+            '10/13': [237, 233, 254],  // domenica_corto
+            '8/16': [191, 219, 254],   // yuri_full
+            '13/16': [191, 219, 254],  // yuri_pomeriggio
+            '14/19': [207, 250, 254],  // pomeriggio_corto (Max)
+          }
+          const colorStroili: Record<string, [number, number, number]> = {
+            M: [219, 234, 254], Pm: [254, 237, 213], F: [220, 252, 231], '—': [243, 244, 246],
+            DL: [237, 233, 254], DC: [237, 233, 254], YF: [191, 219, 254], Y: [191, 219, 254],
+            M5: [207, 250, 254], P5: [254, 237, 213],
+          }
+          const color = (isMD ? colorMD : colorStroili)[val]
+          if (color) data.cell.styles.fillColor = color
         }
       }
     })
@@ -580,7 +608,7 @@ export default function ManagerPage() {
                 <tr className="border-b">
                   <th className="text-left p-3 font-semibold text-gray-700 sticky left-0 bg-white min-w-32">Dipendente</th>
                   {giorni.map(g => (
-                    <th key={g.data} className={`p-2 text-center font-medium min-w-10 ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'}`}>
+                    <th key={g.data} className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'}`}>
                       <div className="text-xs">{g.giorno}</div>
                       <div className="text-xs text-gray-400">{g.num}</div>
                     </th>
@@ -628,8 +656,8 @@ export default function ManagerPage() {
                             onClick={() => !domenicaBloccata && cycleShift(emp.id, g.data)}
                             disabled={domenicaBloccata}
                             title={`Click per cambiare (attuale: ${tipo})`}
-                            className={`inline-block px-1 py-0.5 rounded text-xs font-bold hover:opacity-80 disabled:cursor-not-allowed ${TURNO_COLOR[tipo]}`}>
-                            {TURNO_LABEL[tipo]}
+                            className={`inline-block px-1 py-0.5 rounded text-xs font-bold hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap ${TURNO_COLOR[tipo]}`}>
+                            {getTurnoDisplay(tipo, isMD)}
                           </button>
                         </td>
                       )
@@ -639,9 +667,17 @@ export default function ManagerPage() {
               </tbody>
             </table>
             <div className="p-3 text-xs text-gray-400 flex gap-4 flex-wrap">
-              <span><strong>M</strong> = Mattina {isMD ? '8-14' : '9-14'}</span>
-              <span><strong>Pm</strong> = Pomeriggio 14-20</span>
-              <span><strong>F</strong> = Full {isMD ? '8-20' : '9-20'}</span>
+              {!isMD && <span><strong>M</strong> = Mattina 9-14</span>}
+              {!isMD && <span><strong>Pm</strong> = Pomeriggio 14-20</span>}
+              {!isMD && <span><strong>F</strong> = Full 9-20</span>}
+              {isMD && <span><strong>8/14</strong> = Mattina</span>}
+              {isMD && <span><strong>14/20</strong> = Pomeriggio</span>}
+              {isMD && <span><strong>8/20</strong> = Full</span>}
+              {isMD && <span><strong>8/13</strong> = Mattina corta (Max) / Domenica lungo</span>}
+              {isMD && <span><strong>14/19</strong> = Pomeriggio corto (Max)</span>}
+              {isMD && <span><strong>8/16</strong> = Yuri (sala, Lun/Mer/Ven)</span>}
+              {isMD && <span><strong>13/16</strong> = Yuri (sala, Mar/Gio — mattina in salumeria)</span>}
+              {isMD && <span><strong>10/13</strong> = Domenica corto</span>}
               <span><strong>—</strong> = Riposo</span>
               <span><strong className="text-yellow-700">PR</strong><span className="text-yellow-700"> = Permesso Richiesto</span></span>
               <span><strong className="text-yellow-700">FE</strong><span className="text-yellow-700"> = Ferie</span></span>
@@ -649,12 +685,6 @@ export default function ManagerPage() {
               <span><strong className="text-yellow-700">R</strong><span className="text-yellow-700"> = Recupero</span></span>
               <span><strong className="text-red-700">ML</strong><span className="text-red-700"> = Malattia</span></span>
               <span><strong className="text-yellow-700">MT</strong><span className="text-yellow-700"> = Maternità</span></span>
-              {isMD && <span><strong className="text-purple-700">DL</strong><span className="text-purple-700"> = Domenica lungo 8-13</span></span>}
-              {isMD && <span><strong className="text-purple-700">DC</strong><span className="text-purple-700"> = Domenica corto 10-13</span></span>}
-              {isMD && <span><strong className="text-blue-900">YF</strong><span className="text-blue-900"> = Yuri sala 8-16</span></span>}
-              {isMD && <span><strong className="text-sky-700">Y</strong><span className="text-sky-700"> = Yuri sala 13-16</span></span>}
-              {isMD && <span><strong className="text-cyan-700">M5</strong><span className="text-cyan-700"> = Max mattina 8-13</span></span>}
-              {isMD && <span><strong className="text-orange-600">P5</strong><span className="text-orange-600"> = Max pomeriggio 14-19</span></span>}
             </div>
           </div>
         )}
