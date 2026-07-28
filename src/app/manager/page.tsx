@@ -10,9 +10,12 @@ const MESI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
 const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
   mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina',
   domenica_lungo: 'domenica_lungo', domenica_corto: 'domenica_corto',
+  yuri_full: 'yuri_full', yuri_pomeriggio: 'yuri_pomeriggio',
+  mattina_corta: 'pomeriggio_corto', pomeriggio_corto: 'mattina_corta',
 }
 const TURNO_LABEL: Record<string, string> = {
-  mattina: 'M', pomeriggio: 'Pm', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC'
+  mattina: 'M', pomeriggio: 'Pm', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC',
+  yuri_full: 'YF', yuri_pomeriggio: 'Y', mattina_corta: 'M5', pomeriggio_corto: 'P5',
 }
 const TURNO_COLOR: Record<string, string> = {
   mattina: 'bg-blue-100 text-blue-800',
@@ -21,6 +24,13 @@ const TURNO_COLOR: Record<string, string> = {
   riposo: 'bg-gray-100 text-gray-400',
   domenica_lungo: 'bg-purple-100 text-purple-800',
   domenica_corto: 'bg-purple-100 text-purple-800',
+  yuri_full: 'bg-blue-900 text-blue-50',
+  yuri_pomeriggio: 'bg-sky-100 text-sky-800',
+  mattina_corta: 'bg-cyan-100 text-cyan-800',
+  pomeriggio_corto: 'bg-orange-50 text-orange-600',
+}
+const ASSENZA_LABEL: Record<string, string> = {
+  PR: 'Permesso Richiesto', FE: 'Ferie', P: 'Permesso', R: 'Recupero', ML: 'Malattia', MT: 'Maternità',
 }
 
 /** Prossimo turno nel ciclo di click — comportamento diverso per MD Lanciano (turni fissi, domenica attiva). */
@@ -37,9 +47,13 @@ function nextTurno(current: TurnoTipo, emp: Employee, isDomenica: boolean, isMD:
   // Gilda/Tony: turno fisso mattina, il click non li sposta mai in pomeriggio
   if (emp.turno_fisso === 'mattina') return 'mattina'
 
+  // R9 — le regole/turni speciali (Yuri, Max) sono override automatici, ma un click
+  // manuale di Giacomo può sempre spostare la cella sul ciclo turni standard.
   const cycle: Partial<Record<TurnoTipo, TurnoTipo>> = {
     mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina',
     domenica_lungo: 'mattina', domenica_corto: 'mattina',
+    yuri_full: 'pomeriggio', yuri_pomeriggio: 'pomeriggio',
+    mattina_corta: 'pomeriggio_corto', pomeriggio_corto: 'riposo',
   }
   return cycle[current] ?? 'mattina'
 }
@@ -165,6 +179,14 @@ export default function ManagerPage() {
     setSchedule({ ...schedule, stato: 'pubblicato' })
   }
 
+  async function resetMese() {
+    if (!schedule) return
+    const nomeMese = MESI[mese - 1]
+    if (!window.confirm(`Sei sicuro? Tutti i turni di ${nomeMese} verranno cancellati.`)) return
+    await supabase.from('shifts').delete().eq('schedule_id', schedule.id)
+    window.location.reload()
+  }
+
   async function addEmployee() {
     if (!newEmp.nome.trim()) return
     await fetch('/api/employees', {
@@ -219,20 +241,20 @@ export default function ManagerPage() {
     copyTimerRef.current = setTimeout(() => setCopiedToken(null), 2000)
   }
 
-  async function exportPDF() {
+  async function exportPDF(giorniDaEsportare: typeof giorni = giorni, subtitle?: string) {
     const { jsPDF } = await import('jspdf')
     const { autoTable } = await import('jspdf-autotable')
     const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
 
     const nomeMese = MESI[mese - 1]
     doc.setFontSize(14)
-    doc.text(`Turni ${nomeMese} ${anno} — ${storeNome || 'Negozio'}`, 14, 14)
+    doc.text(`Turni ${nomeMese} ${anno}${subtitle ? ` — ${subtitle}` : ''} — ${storeNome || 'Negozio'}`, 14, 14)
 
-    const head = [['Dipendente', ...giorni.map(g => `${g.num}\n${g.giorno}`)]]
+    const head = [['Dipendente', ...giorniDaEsportare.map(g => `${g.num}\n${g.giorno}`)]]
     const body = employees.map(emp => [
       emp.nome,
-      ...giorni.map(g => {
-        if (hasUnavailability(emp.id, g.data)) return 'PR'
+      ...giorniDaEsportare.map(g => {
+        if (hasUnavailability(emp.id, g.data)) return getAssenzaCode(emp.id, g.data)
         const shift = getShift(emp.id, g.data)
         return TURNO_LABEL[shift?.tipo || 'riposo']
       })
@@ -250,19 +272,59 @@ export default function ManagerPage() {
           const val = data.cell.raw as string
           if (val === 'M') data.cell.styles.fillColor = [219, 234, 254]
           else if (val === 'Pm') data.cell.styles.fillColor = [254, 237, 213]
-          else if (val === 'PR') data.cell.styles.fillColor = [254, 243, 199]
-          else if (val === 'F') data.cell.styles.fillColor = [220, 252, 231]
+          else if (['PR', 'FE', 'P', 'R', 'MT'].includes(val)) data.cell.styles.fillColor = [254, 243, 199]
+          // (ML — Malattia — colorata separatamente sotto)
+          else if (val === 'F') data.cell.styles.fillColor = [220, 252, 231] // turno "full" — 'Ferie' usa 'FE', mai ambiguità
           else if (val === '—') data.cell.styles.fillColor = [243, 244, 246]
           else if (val === 'DL' || val === 'DC') data.cell.styles.fillColor = [237, 233, 254]
+          else if (val === 'YF' || val === 'Y') data.cell.styles.fillColor = [191, 219, 254]
+          else if (val === 'M5' || val === 'P5') data.cell.styles.fillColor = [207, 250, 254]
+          else if (val === 'ML') data.cell.styles.fillColor = [254, 226, 226] // Malattia
         }
       }
     })
 
-    doc.save(`turni-${nomeMese.toLowerCase()}-${anno}.pdf`)
+    const suffix = subtitle ? `-${subtitle.toLowerCase().replace(/\s+/g, '')}` : ''
+    doc.save(`turni-${nomeMese.toLowerCase()}-${anno}${suffix}.pdf`)
+  }
+
+  async function exportPDFSettimana() {
+    const input = window.prompt('Quale settimana vuoi esportare? (1-5)')
+    const settimana = parseInt(input ?? '', 10)
+    if (!settimana || settimana < 1 || settimana > 5) return
+    const startDay = (settimana - 1) * 7 + 1
+    const endDay = settimana * 7
+    const giorniSettimana = giorni.filter(g => g.num >= startDay && g.num <= endDay)
+    if (giorniSettimana.length === 0) { alert('Settimana non valida per questo mese.'); return }
+    await exportPDF(giorniSettimana, `Settimana ${settimana}`)
   }
 
   function hasUnavailability(empId: string, data: string) {
     return unavailabilities.some(u => u.employee_id === empId && u.data === data)
+  }
+
+  // Codice assenza codificato come prefisso "[FE] ..." dentro il campo motivo.
+  // Default 'PR' (Permesso Richiesto) quando non è stato scelto un tipo specifico.
+  // NOTA: Ferie usa 'FE' (non 'F', già usato dal turno "full") e Malattia usa 'ML'
+  // (non 'M', già usato dal turno "Mattina") — evita ambiguità in tabella/PDF/legenda.
+  const ASSENZA_CYCLE = ['PR', 'FE', 'P', 'R', 'ML', 'MT'] as const
+
+  function getAssenzaCode(empId: string, data: string): string {
+    const u = unavailabilities.find(x => x.employee_id === empId && x.data === data)
+    const match = u?.motivo?.match(/^\[(FE|P|R|ML|MT)\]/)
+    return match ? match[1] : 'PR'
+  }
+
+  async function cycleAssenza(empId: string, data: string) {
+    const u = unavailabilities.find(x => x.employee_id === empId && x.data === data)
+    if (!u) return
+    const current = getAssenzaCode(empId, data)
+    const idx = ASSENZA_CYCLE.indexOf(current as typeof ASSENZA_CYCLE[number])
+    const next = ASSENZA_CYCLE[(idx + 1) % ASSENZA_CYCLE.length]
+    const restoMotivo = (u.motivo ?? '').replace(/^\[(FE|P|R|ML|MT)\]\s*/, '')
+    const nuovoMotivo = next === 'PR' ? restoMotivo : `[${next}] ${restoMotivo}`.trim()
+    await supabase.from('unavailabilities').update({ motivo: nuovoMotivo || null }).eq('id', u.id)
+    setUnavailabilities(prev => prev.map(x => x.id === u.id ? { ...x, motivo: nuovoMotivo || null } : x))
   }
 
   function toggleModalDate(data: string) {
@@ -387,15 +449,25 @@ export default function ManagerPage() {
                 className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50">
                 {loading ? 'Generando...' : '⚡ Genera turni'}
               </button>
+              {shifts.length > 0 && (
+                <button onClick={resetMese} className="bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded hover:bg-red-100">
+                  🗑️ Reset mese
+                </button>
+              )}
               {schedule.stato === 'bozza' && shifts.length > 0 && (
                 <button onClick={pubblicaTurni} className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">
                   ✅ Pubblica
                 </button>
               )}
               {shifts.length > 0 && (
-                <button onClick={exportPDF} className="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700">
-                  📄 Crea PDF
-                </button>
+                <>
+                  <button onClick={() => exportPDF()} className="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700">
+                    📄 PDF Mese
+                  </button>
+                  <button onClick={exportPDFSettimana} className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600">
+                    📄 PDF Settimana
+                  </button>
+                </>
               )}
               <span className={`px-3 py-1 rounded-full text-sm font-medium ${
                 schedule.stato === 'pubblicato' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
@@ -536,14 +608,15 @@ export default function ManagerPage() {
                       const cellBg = g.domenica ? (isMD ? 'bg-purple-50' : 'bg-red-50') : ''
 
                       if (isPermesso && tipo === 'riposo') {
+                        const assenzaCode = getAssenzaCode(emp.id, g.data)
                         return (
                           <td key={g.data} className={`p-1 text-center ${cellBg}`}>
                             <button
-                              onClick={() => !domenicaBloccata && cycleShift(emp.id, g.data)}
+                              onClick={() => !domenicaBloccata && cycleAssenza(emp.id, g.data)}
                               disabled={domenicaBloccata}
-                              title="Permesso Richiesto"
+                              title={`${ASSENZA_LABEL[assenzaCode]} — click per cambiare tipo`}
                               className="inline-block px-1 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-800 hover:opacity-80 disabled:cursor-not-allowed">
-                              PR
+                              {assenzaCode}
                             </button>
                           </td>
                         )
@@ -571,8 +644,17 @@ export default function ManagerPage() {
               <span><strong>F</strong> = Full {isMD ? '8-20' : '9-20'}</span>
               <span><strong>—</strong> = Riposo</span>
               <span><strong className="text-yellow-700">PR</strong><span className="text-yellow-700"> = Permesso Richiesto</span></span>
+              <span><strong className="text-yellow-700">FE</strong><span className="text-yellow-700"> = Ferie</span></span>
+              <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
+              <span><strong className="text-yellow-700">R</strong><span className="text-yellow-700"> = Recupero</span></span>
+              <span><strong className="text-red-700">ML</strong><span className="text-red-700"> = Malattia</span></span>
+              <span><strong className="text-yellow-700">MT</strong><span className="text-yellow-700"> = Maternità</span></span>
               {isMD && <span><strong className="text-purple-700">DL</strong><span className="text-purple-700"> = Domenica lungo 8-13</span></span>}
               {isMD && <span><strong className="text-purple-700">DC</strong><span className="text-purple-700"> = Domenica corto 10-13</span></span>}
+              {isMD && <span><strong className="text-blue-900">YF</strong><span className="text-blue-900"> = Yuri sala 8-16</span></span>}
+              {isMD && <span><strong className="text-sky-700">Y</strong><span className="text-sky-700"> = Yuri sala 13-16</span></span>}
+              {isMD && <span><strong className="text-cyan-700">M5</strong><span className="text-cyan-700"> = Max mattina 8-13</span></span>}
+              {isMD && <span><strong className="text-orange-600">P5</strong><span className="text-orange-600"> = Max pomeriggio 14-19</span></span>}
             </div>
           </div>
         )}

@@ -1,4 +1,6 @@
-export type TurnoTipo = 'mattina' | 'pomeriggio' | 'full' | 'riposo' | 'domenica_lungo' | 'domenica_corto'
+export type TurnoTipo =
+  | 'mattina' | 'pomeriggio' | 'full' | 'riposo' | 'domenica_lungo' | 'domenica_corto'
+  | 'yuri_full' | 'yuri_pomeriggio' | 'mattina_corta' | 'pomeriggio_corto'
 
 export const MD_LANCIANO_STORE_NOME = 'MD Lanciano'
 
@@ -9,7 +11,7 @@ export interface Store {
 }
 
 export type Ruolo = 'cassiere' | 'non_cassiere'
-export type TurnoFisso = 'mattina' | 'pomeriggio' | null
+export type TurnoFisso = 'mattina' | 'pomeriggio' | 'mattina_preferita' | null
 
 export interface Employee {
   id: string
@@ -59,6 +61,7 @@ export const ORE_TURNO: Record<TurnoTipo, number> = {
   riposo: 0,
   domenica_lungo: 0, // non usato da Stroili
   domenica_corto: 0, // non usato da Stroili
+  yuri_full: 0, yuri_pomeriggio: 0, mattina_corta: 0, pomeriggio_corto: 0, // non usati da Stroili
 }
 
 export const ORARI_TURNO: Record<TurnoTipo, { inizio: string; fine: string } | null> = {
@@ -68,6 +71,7 @@ export const ORARI_TURNO: Record<TurnoTipo, { inizio: string; fine: string } | n
   riposo: null,
   domenica_lungo: null,
   domenica_corto: null,
+  yuri_full: null, yuri_pomeriggio: null, mattina_corta: null, pomeriggio_corto: null,
 }
 
 // ── MD Lanciano — orari e ore propri (store-specific, non toccano Stroili) ──
@@ -78,6 +82,10 @@ export const ORE_TURNO_MD: Record<TurnoTipo, number> = {
   riposo: 0,
   domenica_lungo: 5,   // 08:00-13:00
   domenica_corto: 3,   // 10:00-13:00
+  yuri_full: 8,        // 08:00-16:00 (Lun/Mer/Ven)
+  yuri_pomeriggio: 3,  // 13:00-16:00 (Mar/Gio, mattina in salumeria)
+  mattina_corta: 5,    // 08:00-13:00 (Max)
+  pomeriggio_corto: 5, // 14:00-19:00 (Max)
 }
 
 export const ORARI_TURNO_MD: Record<TurnoTipo, { inizio: string; fine: string } | null> = {
@@ -87,6 +95,10 @@ export const ORARI_TURNO_MD: Record<TurnoTipo, { inizio: string; fine: string } 
   riposo: null,
   domenica_lungo: { inizio: '08:00', fine: '13:00' },
   domenica_corto: { inizio: '10:00', fine: '13:00' },
+  yuri_full:        { inizio: '08:00', fine: '16:00' },
+  yuri_pomeriggio:  { inizio: '13:00', fine: '16:00' },
+  mattina_corta:    { inizio: '08:00', fine: '13:00' },
+  pomeriggio_corto: { inizio: '14:00', fine: '19:00' },
 }
 
 // Ore mensili target per contratto MD Lanciano (R6)

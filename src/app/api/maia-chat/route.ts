@@ -20,7 +20,11 @@ const tools: Anthropic.Tool[] = [
       properties: {
         employee_name: { type: 'string', description: 'Nome del dipendente' },
         data: { type: 'string', description: 'Data in formato YYYY-MM-DD' },
-        tipo: { type: 'string', enum: ['mattina', 'pomeriggio', 'full', 'riposo'], description: 'Tipo di turno' },
+        tipo: {
+          type: 'string',
+          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto'],
+          description: 'Tipo di turno. yuri_full=08-16 (Lun/Mer/Ven Yuri), yuri_pomeriggio=13-16 (Mar/Gio Yuri), mattina_corta=08-13 e pomeriggio_corto=14-19 (Max, 5h)',
+        },
       },
       required: ['employee_name', 'data', 'tipo'],
     },
@@ -34,7 +38,10 @@ const tools: Anthropic.Tool[] = [
         employee_name: { type: 'string' },
         data_inizio: { type: 'string', description: 'Data inizio YYYY-MM-DD' },
         data_fine: { type: 'string', description: 'Data fine YYYY-MM-DD' },
-        tipo: { type: 'string', enum: ['mattina', 'pomeriggio', 'full', 'riposo'] },
+        tipo: {
+          type: 'string',
+          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto'],
+        },
       },
       required: ['employee_name', 'data_inizio', 'data_fine', 'tipo'],
     },
@@ -157,25 +164,28 @@ export async function POST(req: NextRequest) {
     ? `Oggi è ${oggi}. Il mese corrente per la pianificazione turni è ${mese}/${anno}.`
     : `Oggi è ${oggi}.`
 
-  const system = `Sei Maia, un'assistente AI specializzata nella gestione dei turni per supermercati e negozi retail in Italia. Stai aiutando il manager del supermercato MD Lanciano.
+  const system = `Sei Maia, assistente AI per la gestione turni di MD Lanciano (supermercato).
 
 ${dataContext}
 
-Conosci queste regole del negozio:
-- Orario: 08:00-20:00
-- Turni: Mattina 08-14, Pomeriggio 14-20, Full 08-20
-- Domenica: 2 persone 08-13, 1 persona 10-13
-- Fascia 14-16: Yuri deve essere sempre presente
-- Fascia 08-13 e 17-20: minimo 3 cassieri
-- Gilda e Tony: sempre mattina, non fanno cassa
-- Max e Romeo: si alternano mattina/pomeriggio a settimane alterne
-- Le 22h (Marilena, Angelica, Elisa, Damiana): 2 mattina + 2 pomeriggio
-- Priorità cassa: 22h prime, poi 28h, poi 30h, poi 35h/46h
-
 ${context ?? ''}
 
-Rispondi sempre in italiano, in modo conciso e pratico. Puoi suggerire modifiche ai turni, avvisare di problemi di copertura, rispondere a domande sui dipendenti e sui giorni specifici.
-Se il manager ti chiede di modificare un turno, usa i tool a disposizione invece di limitarti a descrivere la modifica — solo così viene salvata davvero.`
+REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
+1. Gilda e Tony: sempre mattina 08-14, mai domenica
+2. Yuri: Lun/Mer/Ven 08-16 in sala (turno yuri_full); Mar/Gio 13-16 in sala (turno yuri_pomeriggio, mattina in salumeria); Sab 08-14; Dom riposo
+3. Carlo: Mar e Gio obbligatoriamente mattina; altri giorni preferenza mattina, pomeriggio solo se serve bilanciare le ore
+4. Max: sempre 5h — mattina_corta 08-13 o pomeriggio_corto 14-19; alterna con Romeo a settimane alterne (turni standard da 6h per Romeo)
+5. Cassiere 22h (Marilena, Angelica, Elisa, Damiana): 2 di mattina + 2 di pomeriggio ogni giorno
+6. Fascia 13-16: sempre Yuri presente + minimo 1 altro cassiere
+7. Chiusura 20:00: minimo 3 persone (sabato 4)
+8. Domenica: 2 persone domenica_lungo 08-13, 1 cassiera 22h domenica_corto 10-13; mai Gilda e Tony, mai Yuri
+9. Cristina e Stefania: 3 mattine + 3 pomeriggi a settimana ciascuna (Lun/Mer/Ven mattina, Mar/Gio/Sab pomeriggio)
+
+COMPORTAMENTO:
+- Rispondi sempre in italiano, sii concisa e pratica
+- Puoi modificare i turni usando i tool a disposizione — se ti chiedono una modifica, USA il tool invece di limitarti a descriverla, altrimenti non viene salvata davvero
+- Se una modifica richiesta viola una regola assoluta, AVVISA e chiedi conferma esplicita a Giacomo prima di procedere
+- Se Giacomo conferma esplicitamente di voler procedere comunque, esegui la modifica anche in deroga alle regole`
 
   const canUseTools = !!storeId && !!scheduleId
 
