@@ -38,7 +38,10 @@ export async function POST(req: NextRequest) {
 
   // Inserisce
   const { error } = await supabaseAdmin.from('shifts').insert(shifts)
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) {
+    console.error('[shifts/generate] insert error:', error)
+    return NextResponse.json({ error: error.message, details: error.details, hint: error.hint, code: error.code }, { status: 500 })
+  }
 
   return NextResponse.json({ ok: true, shifts_generated: shifts.length })
 }
