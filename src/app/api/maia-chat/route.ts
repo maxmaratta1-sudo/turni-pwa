@@ -67,12 +67,22 @@ interface ToolCtx {
 async function findEmployee(nome: string, storeId: string) {
   const { data, error } = await supabaseAdmin
     .from('employees')
-    .select('id, nome')
+    .select('id, nome, turno_fisso')
     .eq('store_id', storeId)
     .ilike('nome', nome)
     .maybeSingle()
   if (error || !data) return null
   return data
+}
+
+const isDomenicaTipo = (tipo: string) => tipo === 'domenica_lungo' || tipo === 'domenica_corto'
+
+/** Gilda e Tony sono escluse definitivamente dai turni domenicali — nessuna eccezione, nemmeno via Maia. */
+function assertNonDomenicaPerEsclusi(emp: { nome: string; turno_fisso?: string | null }, tipo: string): string | null {
+  if (isDomenicaTipo(tipo) && emp.turno_fisso === 'mattina') {
+    return `Errore: ${emp.nome} è esclusa/o definitivamente dai turni domenicali — non posso assegnarle/gli "${tipo}".`
+  }
+  return null
 }
 
 async function upsertShift(scheduleId: string, employeeId: string, data: string, tipo: TurnoTipo) {
@@ -108,6 +118,8 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
   if (toolName === 'update_shift') {
     const emp = await findEmployee(input.employee_name, ctx.storeId)
     if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
+    const blocco = assertNonDomenicaPerEsclusi(emp, input.tipo)
+    if (blocco) return blocco
     const { error } = await upsertShift(ctx.scheduleId, emp.id, input.data, input.tipo)
     if (error) return `Errore salvataggio turno: ${error.message}`
     return `OK: turno di ${emp.nome} il ${input.data} impostato su "${input.tipo}".`
@@ -116,13 +128,15 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
   if (toolName === 'update_shift_week') {
     const emp = await findEmployee(input.employee_name, ctx.storeId)
     if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
+    const blocco = assertNonDomenicaPerEsclusi(emp, input.tipo)
+    if (blocco) return blocco
     const dates = eachDate(input.data_inizio, input.data_fine)
-    const isDomenicaTipo = input.tipo === 'domenica_lungo' || input.tipo === 'domenica_corto'
+    const isTipoDomenica = isDomenicaTipo(input.tipo)
     let modificati = 0
     let saltati = 0
     for (const d of dates) {
       const dayOfWeek = new Date(d + 'T00:00:00').getDay()
-      if (dayOfWeek === 0 && !isDomenicaTipo) { saltati++; continue }
+      if (dayOfWeek === 0 && !isTipoDomenica) { saltati++; continue }
       const { error } = await upsertShift(ctx.scheduleId, emp.id, d, input.tipo)
       if (!error) modificati++
     }
@@ -183,7 +197,8 @@ REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
 REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente):
 - Il supermercato è aperto 08:00–13:00
 - Lavorano 3 persone: 2 dalle 08:00 alle 13:00 (5h, turno domenica_lungo), 1 dalle 10:00 alle 13:00 (3h, turno domenica_corto)
-- Qualsiasi dipendente può lavorare la domenica (nessuna eccezione automatica — l'algoritmo di generazione automatica NON assegna mai turni domenicali, sono sempre riposo di default finché Giacomo non li assegna manualmente)
+- ECCEZIONE ASSOLUTA: Gilda e Tony sono escluse DEFINITIVAMENTE dai turni domenicali, senza eccezioni — nemmeno su richiesta esplicita di Giacomo. Se te lo chiedesse, rispondi: "Gilda e Tony sono escluse in modo permanente dai turni domenicali — non posso assegnarle/gli la domenica."
+- Tutti gli altri dipendenti possono lavorare la domenica (nessuna eccezione automatica per loro — l'algoritmo di generazione automatica NON assegna mai turni domenicali a nessuno, sono sempre riposo di default finché Giacomo non li assegna manualmente)
 - Chi lavora domenica riceve un riposo compensativo durante la settimana pari alle ore domenicali.
   Es: lavora 08-13 domenica (5h) → riposa il giorno della settimana in cui avrebbe fatto 5h
 - SOLO Giacomo è autorizzato a chiedere a Maia di inserire turni domenicali

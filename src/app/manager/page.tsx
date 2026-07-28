@@ -53,6 +53,8 @@ function nextTurno(current: TurnoTipo, emp: Employee, isDomenica: boolean, isMD:
   if (!isMD) return TURNO_CYCLE[current] // Stroili — invariato
 
   if (isDomenica) {
+    // Gilda e Tony: escluse definitivamente dai turni domenicali — click bloccato su riposo
+    if (emp.turno_fisso === 'mattina') return 'riposo'
     const cycle: Partial<Record<TurnoTipo, TurnoTipo>> = {
       riposo: 'domenica_lungo', domenica_lungo: 'domenica_corto', domenica_corto: 'riposo',
     }
