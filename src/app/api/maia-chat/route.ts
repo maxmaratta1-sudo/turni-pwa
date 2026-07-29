@@ -120,12 +120,62 @@ interface ToolCtx {
 async function findEmployee(nome: string, storeId: string) {
   const { data, error } = await supabaseAdmin
     .from('employees')
-    .select('id, nome, turno_fisso')
+    .select('id, nome, turno_fisso, ore_settimanali')
     .eq('store_id', storeId)
     .ilike('nome', nome)
     .maybeSingle()
   if (error || !data) return null
   return data
+}
+
+/** Lunedì della settimana ISO contenente `data` (YYYY-MM-DD). */
+function getMonday(data: string): Date {
+  const d = new Date(data + 'T00:00:00')
+  const day = d.getDay() || 7 // domenica=7
+  if (day !== 1) d.setDate(d.getDate() - (day - 1))
+  return d
+}
+
+function toDateStr(d: Date): string {
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+
+function getOreTurno(tipo: string): number {
+  if (tipo === 'riposo') return 0
+  const orario = ORARI_TURNO_MD[tipo as TurnoTipo]
+  return orario ? oreFromOrario(orario.inizio, orario.fine) : 0
+}
+
+/** Verifica che, applicando `tipo` a `data` per `employeeId`, il totale ore della
+ * settimana (Lun-Dom) non superi le ore contrattuali. Ritorna un messaggio d'errore
+ * se sfora, altrimenti null. */
+async function verificaBudgetSettimanale(
+  scheduleId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string
+): Promise<string | null> {
+  const monday = getMonday(data)
+  const sunday = new Date(monday)
+  sunday.setDate(sunday.getDate() + 6)
+
+  const { data: weekShifts } = await supabaseAdmin
+    .from('shifts')
+    .select('data, tipo')
+    .eq('employee_id', employeeId)
+    .eq('schedule_id', scheduleId)
+    .gte('data', toDateStr(monday))
+    .lte('data', toDateStr(sunday))
+
+  const oreEsistenti = (weekShifts || [])
+    .filter(s => s.data !== data)
+    .reduce((sum, s) => sum + getOreTurno(s.tipo), 0)
+  const oreDopoModifica = oreEsistenti + getOreTurno(tipo)
+
+  if (oreDopoModifica > oreSettimanali) {
+    return `Errore: impossibile assegnare "${tipo}" a ${nome} il ${data} — avrebbe ${oreDopoModifica}h questa settimana (contratto: ${oreSettimanali}h). Proponi un'alternativa con meno ore o un altro giorno.`
+  }
+  return null
 }
 
 const isDomenicaTipo = (tipo: string) => tipo === 'domenica_lungo' || tipo === 'domenica_corto'
@@ -173,6 +223,8 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
     const blocco = assertNonDomenicaPerEsclusi(emp, input.tipo)
     if (blocco) return blocco
+    const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, input.data, input.tipo, emp.ore_settimanali, emp.nome)
+    if (erroreOre) return erroreOre
     const { error } = await upsertShift(ctx.scheduleId, emp.id, input.data, input.tipo)
     if (error) return `Errore salvataggio turno: ${error.message}`
     return `OK: turno di ${emp.nome} il ${input.data} impostato su "${input.tipo}".`
@@ -187,13 +239,19 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     const isTipoDomenica = isDomenicaTipo(input.tipo)
     let modificati = 0
     let saltati = 0
+    let bloccatiPerOre = 0
     for (const d of dates) {
       const dayOfWeek = new Date(d + 'T00:00:00').getDay()
       if (dayOfWeek === 0 && !isTipoDomenica) { saltati++; continue }
+      const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, d, input.tipo, emp.ore_settimanali, emp.nome)
+      if (erroreOre) { bloccatiPerOre++; continue }
       const { error } = await upsertShift(ctx.scheduleId, emp.id, d, input.tipo)
       if (!error) modificati++
     }
-    return `OK: turno di ${emp.nome} impostato su "${input.tipo}" per ${modificati} giorni (${input.data_inizio} → ${input.data_fine})${saltati > 0 ? `, ${saltati} domeniche escluse` : ''}.`
+    if (modificati === 0 && bloccatiPerOre > 0) {
+      return `Errore: impossibile assegnare "${input.tipo}" a ${emp.nome} per nessuno dei giorni richiesti — supererebbe il contratto di ${emp.ore_settimanali}h in ${bloccatiPerOre} giorno/i. Proponi un'alternativa.`
+    }
+    return `OK: turno di ${emp.nome} impostato su "${input.tipo}" per ${modificati} giorni (${input.data_inizio} → ${input.data_fine})${saltati > 0 ? `, ${saltati} domeniche escluse` : ''}${bloccatiPerOre > 0 ? `, ${bloccatiPerOre} giorni saltati per superamento ore contrattuali` : ''}.`
   }
 
   if (toolName === 'get_employee_shifts') {
@@ -421,6 +479,10 @@ Prima di confermare qualsiasi modifica ai turni, Maia DEVE verificare che:
 4. Nessun turno inizi prima delle 08:00
 
 Se una modifica richiesta violerebbe questi vincoli, Maia DEVE rifiutare e spiegare perché.
+I tool update_shift e update_shift_week verificano automaticamente il budget ore
+settimanale e rifiutano l'operazione se la sforerebbe — se ricevi un errore di questo
+tipo, NON insistere con lo stesso turno: proponi a Giacomo un'alternativa valida
+(meno ore quel giorno, un altro giorno, o scambiare con un altro dipendente).
 
 ⚠️ IMPORTANTE: Per assenze (Ferie/Permesso/Malattia/Recupero/Maternità) usa SEMPRE il tool
 set_assenza, MAI update_shift. Il tool update_shift è solo per turni lavorativi

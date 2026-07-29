@@ -280,6 +280,29 @@ export default function ManagerPage() {
     await loadData()
   }
 
+  function controllaTurni() {
+    const messaggioControllo = `
+Analizza il piano turni completo di ${MESI[mese - 1]} ${anno} e fai un controllo completo.
+
+Per ogni giorno del mese verifica:
+1. Le ore settimanali di ogni dipendente rispettano il contratto (mai in eccesso)
+2. La fascia 13-16 ha sempre Yuri + minimo 1 altro cassiere
+3. La chiusura alle 20:00 ha minimo 3 persone (sabato 4)
+4. Gilda e Tony fanno sempre mattina
+5. Max e Romeo si alternano correttamente
+6. Carlo e Yuri sabato sono opposti
+7. Le cassiere 22h hanno 2 mattina + 2 pomeriggio ogni giorno
+8. Nessun turno inizia prima delle 08:00 o finisce dopo le 20:00
+9. Le regole custom salvate sono rispettate
+
+Rispondi con:
+- ✅ per ogni regola rispettata
+- ⚠️ per situazioni borderline
+- ❌ per violazioni da correggere con indicazione esatta del giorno e dipendente
+`
+    window.dispatchEvent(new CustomEvent('maiaAutoMessage', { detail: { message: messaggioControllo } }))
+  }
+
   async function pubblicaTurni() {
     if (!schedule) return
     await supabase.from('schedules').update({ stato: 'pubblicato' }).eq('id', schedule.id)
@@ -785,6 +808,12 @@ export default function ManagerPage() {
                 className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50">
                 {loading ? 'Generando...' : '⚡ Genera turni'}
               </button>
+              {isMD && shifts.length > 0 && (
+                <button onClick={controllaTurni}
+                  className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 flex items-center gap-2">
+                  🔍 Controlla turni
+                </button>
+              )}
               {shifts.length > 0 && (
                 <button onClick={resetMese} className="bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded hover:bg-red-100">
                   🗑️ Reset mese

@@ -1,5 +1,5 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Employee, Shift } from '@/types'
 
 interface Msg { role: 'user' | 'assistant'; content: string }
@@ -50,10 +50,7 @@ export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, e
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
 
-  if (!isMD) return null
-
-  async function send() {
-    const text = input.trim()
+  async function sendText(text: string) {
     if (!text || loading) return
     const nextMessages: Msg[] = [...messages, { role: 'user', content: text }]
     setMessages(nextMessages)
@@ -76,6 +73,25 @@ export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, e
     }
     setLoading(false)
   }
+
+  async function send() {
+    await sendText(input.trim())
+  }
+
+  // Messaggi automatici inviati dall'esterno (es. bottone "Controlla turni" nel manager)
+  useEffect(() => {
+    if (!isMD) return
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ message: string }>).detail
+      if (!detail?.message) return
+      setOpen(true)
+      sendText(detail.message)
+    }
+    window.addEventListener('maiaAutoMessage', handler as EventListener)
+    return () => window.removeEventListener('maiaAutoMessage', handler as EventListener)
+  }, [isMD, messages, loading, employees, shifts, giorni, mese, anno, storeId, scheduleId])
+
+  if (!isMD) return null
 
   return (
     <>
