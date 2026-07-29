@@ -298,7 +298,7 @@ export default function ManagerPage() {
     const headRow: string[] = ['Dipendente']
     giorniDaEsportare.forEach(g => {
       headRow.push(`${g.num}\n${g.giorno}`)
-      if (isMD && GIORNI_FINE_SETTIMANA_TOT.includes(g.num)) headRow.push('TOT')
+      if (isMD && g.domenica) headRow.push('TOT')
     })
     const head = [headRow]
 
@@ -311,8 +311,8 @@ export default function ManagerPage() {
           const shift = getShift(emp.id, g.data)
           row.push(getTurnoDisplay(shift?.tipo || 'riposo', isMD))
         }
-        if (isMD && GIORNI_FINE_SETTIMANA_TOT.includes(g.num)) {
-          row.push(`${totSettimana(emp.id, g.num)}h`)
+        if (isMD && g.domenica) {
+          row.push(`${totSettimana(emp.id, g.data)}h`)
         }
       })
       return row
@@ -411,7 +411,10 @@ export default function ManagerPage() {
   }
 
   // ── Colonna TOT settimanale (solo MD) ────────────────────────────────────
-  const GIORNI_FINE_SETTIMANA_TOT = [7, 14, 21, 28]
+  // La colonna TOT va inserita dopo OGNI domenica reale (g.domenica), non dopo
+  // giorni fissi 7/14/21/28 — un mese non inizia sempre di lunedì, quindi quei
+  // numeri fissi disallineavano il raggruppamento rispetto alle settimane ISO
+  // usate dall'algoritmo in generator.ts (che è invece corretto).
 
   function oreLavorateGiorno(empId: string, data: string): number {
     if (hasUnavailability(empId, data)) return 0 // assenza = 0h lavorate
@@ -419,10 +422,16 @@ export default function ManagerPage() {
     return ORE_PER_TURNO[shift?.tipo ?? 'riposo'] ?? 0
   }
 
-  function totSettimana(empId: string, finoAlGiorno: number): number {
-    const inizio = finoAlGiorno - 6
+  /** Somma le ore lavorate nei (fino a) 7 giorni che terminano con la domenica `sundayData`. */
+  function totSettimana(empId: string, sundayData: string): number {
+    const sunday = new Date(sundayData + 'T00:00:00')
+    const start = new Date(sunday)
+    start.setDate(start.getDate() - 6)
     return giorni
-      .filter(g => g.num >= inizio && g.num <= finoAlGiorno)
+      .filter(g => {
+        const d = new Date(g.data + 'T00:00:00')
+        return d >= start && d <= sunday
+      })
       .reduce((sum, g) => sum + oreLavorateGiorno(empId, g.data), 0)
   }
 
@@ -690,7 +699,7 @@ export default function ManagerPage() {
                         <div className="text-xs">{g.giorno}</div>
                         <div className="text-xs text-gray-400">{g.num}</div>
                       </th>
-                      {isMD && GIORNI_FINE_SETTIMANA_TOT.includes(g.num) && (
+                      {isMD && g.domenica && (
                         <th className="p-2 text-center font-semibold text-gray-700 bg-gray-50 min-w-16">TOT</th>
                       )}
                     </Fragment>
@@ -742,8 +751,8 @@ export default function ManagerPage() {
                         </td>
                       )
 
-                      const showTot = isMD && GIORNI_FINE_SETTIMANA_TOT.includes(g.num)
-                      const tot = showTot ? totSettimana(emp.id, g.num) : 0
+                      const showTot = isMD && g.domenica
+                      const tot = showTot ? totSettimana(emp.id, g.data) : 0
 
                       return (
                         <Fragment key={g.data}>
