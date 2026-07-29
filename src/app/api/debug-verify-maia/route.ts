@@ -14,3 +14,20 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({ unavailability: unav, shift, saldo })
 }
+
+export async function DELETE(req: NextRequest) {
+  const auth = req.headers.get('authorization')
+  if (auth !== 'Bearer debug-md-2026-temp') return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+
+  const empId = '63b23b49-270b-4afc-8a15-68df9e388616' // Angelica
+  const scheduleId = '5c4daad2-427b-4f26-8847-dcc3a3bc3896'
+
+  await supabaseAdmin.from('unavailabilities').delete().eq('employee_id', empId).eq('schedule_id', scheduleId).eq('data', '2026-08-03')
+
+  const { data: saldo } = await supabaseAdmin.from('ferie_saldo').select('*').eq('employee_id', empId).eq('anno', 2026).maybeSingle()
+  if (saldo) {
+    await supabaseAdmin.from('ferie_saldo').update({ ferie_giorni_usati: Math.max(0, saldo.ferie_giorni_usati - 1) }).eq('id', saldo.id)
+  }
+
+  return NextResponse.json({ ok: true, reverted: true })
+}
