@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, Fragment } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME } from '@/types'
+import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME, ORARI_TURNO, ORARI_TURNO_MD } from '@/types'
 import MaiaChatBubble from '@/components/MaiaChatBubble'
 import { oreFromOrario } from '@/lib/generator'
 
@@ -60,6 +60,14 @@ const ORE_PER_TURNO: Record<string, number> = {
 
 const ASSENZA_LABEL: Record<string, string> = {
   P: 'Permesso', F: 'Ferie', R: 'Recupero', M: 'Malattia', MT: 'Maternità',
+}
+
+const ASSENZA_COLOR: Record<string, string> = {
+  F: 'bg-yellow-100 text-yellow-800',
+  P: 'bg-orange-100 text-orange-800',
+  R: 'bg-blue-100 text-blue-800',
+  M: 'bg-red-100 text-red-800',
+  MT: 'bg-pink-100 text-pink-800',
 }
 
 // Orari reali MD Lanciano — mostrati in cella invece delle lettere, SOLO per MD.
@@ -520,11 +528,14 @@ export default function ManagerPage() {
     const existing = getShift(empId, data)
     const currentTipo: TurnoTipo = (existing?.tipo as TurnoTipo) ?? 'riposo'
     const nextTipo = nextTurno(currentTipo, emp, isDomenica, isMD)
+    const orario = nextTipo !== 'riposo' ? (isMD ? ORARI_TURNO_MD[nextTipo] : ORARI_TURNO[nextTipo]) : null
 
     // Aggiornamento ottimistico
     if (existing) {
       setShifts(prev => prev.map(s =>
-        s.employee_id === empId && s.data === data ? { ...s, tipo: nextTipo } : s
+        s.employee_id === empId && s.data === data
+          ? { ...s, tipo: nextTipo, ora_inizio: orario?.inizio, ora_fine: orario?.fine }
+          : s
       ))
     } else {
       const optimistic: Shift = {
@@ -533,18 +544,18 @@ export default function ManagerPage() {
         employee_id: empId,
         data,
         tipo: nextTipo,
-        ora_inizio: undefined,
-        ora_fine: undefined
+        ora_inizio: orario?.inizio,
+        ora_fine: orario?.fine,
       }
       setShifts(prev => [...prev, optimistic])
     }
 
     // Persist su Supabase
     if (existing) {
-      await supabase.from('shifts').update({ tipo: nextTipo }).eq('id', existing.id)
+      await supabase.from('shifts').update({ tipo: nextTipo, ora_inizio: orario?.inizio ?? null, ora_fine: orario?.fine ?? null }).eq('id', existing.id)
     } else {
       const { data: newShift } = await supabase.from('shifts')
-        .insert({ schedule_id: schedule.id, employee_id: empId, data, tipo: nextTipo })
+        .insert({ schedule_id: schedule.id, employee_id: empId, data, tipo: nextTipo, ora_inizio: orario?.inizio ?? null, ora_fine: orario?.fine ?? null })
         .select().single()
       if (newShift) {
         setShifts(prev => prev.map(s =>
@@ -785,15 +796,16 @@ export default function ManagerPage() {
                       const domenicaBloccata = g.domenica && !isMD
                       const cellBg = g.domenica ? (isMD ? 'bg-purple-50' : 'bg-red-50') : ''
 
-                      const dayCell = (isPermesso && tipo === 'riposo') ? (() => {
+                      const dayCell = isPermesso ? (() => {
                         const assenzaCode = getAssenzaCode(emp.id, g.data)
+                        const colore = ASSENZA_COLOR[assenzaCode] ?? 'bg-orange-100 text-orange-800'
                         return (
                           <td className={`p-1 text-center ${cellBg}`}>
                             <button
                               onClick={() => !domenicaBloccata && cycleAssenza(emp.id, g.data)}
                               disabled={domenicaBloccata}
                               title={`${ASSENZA_LABEL[assenzaCode]} — click per cambiare tipo`}
-                              className="inline-block px-1 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-800 hover:opacity-80 disabled:cursor-not-allowed">
+                              className={`inline-block px-1 py-0.5 rounded text-xs font-bold hover:opacity-80 disabled:cursor-not-allowed ${colore}`}>
                               {assenzaCode}
                             </button>
                           </td>
