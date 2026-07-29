@@ -281,24 +281,38 @@ export default function ManagerPage() {
   }
 
   function controllaTurni() {
+    const settimane = getSettimaneLunDom(giorni, mese)
+
+    const riepilogoOre = employees.map(emp => {
+      const orePerSettimana = settimane.map((sett, i) => {
+        const ore = sett.giorni.reduce((sum, g) => sum + oreLavorateGiorno(emp.id, g.data), 0)
+        return `Sett${i + 1}: ${ore}h`
+      })
+      return `- ${emp.nome} (contratto ${emp.ore_settimanali}h): ${orePerSettimana.join(', ')}`
+    }).join('\n')
+
     const messaggioControllo = `
-Analizza il piano turni completo di ${MESI[mese - 1]} ${anno} e fai un controllo completo.
+Analizza il piano turni di ${MESI[mese - 1]} ${anno} usando questi dati REALI:
 
-Per ogni giorno del mese verifica:
-1. Le ore settimanali di ogni dipendente rispettano il contratto (mai in eccesso)
-2. La fascia 13-16 ha sempre Yuri + minimo 1 altro cassiere
-3. La chiusura alle 20:00 ha minimo 3 persone (sabato 4)
-4. Gilda e Tony fanno sempre mattina
-5. Max e Romeo si alternano correttamente
-6. Carlo e Yuri sabato sono opposti
-7. Le cassiere 22h hanno 2 mattina + 2 pomeriggio ogni giorno
-8. Nessun turno inizia prima delle 08:00 o finisce dopo le 20:00
-9. Le regole custom salvate sono rispettate
+ORE SETTIMANALI REALI:
+${riepilogoOre}
 
-Rispondi con:
-- ✅ per ogni regola rispettata
-- ⚠️ per situazioni borderline
-- ❌ per violazioni da correggere con indicazione esatta del giorno e dipendente
+Controlla e rispondi SOLO con questo formato, in italiano semplice:
+
+✅ o ❌ ORE SETTIMANALI:
+Per ogni dipendente con ore in eccesso rispetto al contratto scrivi:
+"❌ [Nome]: settimana [N] ha [X]h invece di [Y]h contratto"
+
+✅ o ❌ FASCIA 13-16:
+Segnala solo i giorni con problemi di copertura.
+
+✅ o ⚠️ o ❌ CHIUSURA 20:00:
+Segnala solo i giorni con meno di 3 persone (4 il sabato).
+
+✅ o ❌ REGOLE FISSE:
+Segnala solo le violazioni trovate.
+
+Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
 `
     window.dispatchEvent(new CustomEvent('maiaAutoMessage', { detail: { message: messaggioControllo } }))
   }
@@ -936,6 +950,19 @@ Rispondi con:
             </div>
           )}
         </div>
+
+        {/* Banner avvisi ore in eccesso rispetto al contratto */}
+        {isMD && shifts.length > 0 && employees.filter(emp => {
+          const settimane = getSettimaneLunDom(giorni, mese)
+          return settimane.some(sett => {
+            const ore = sett.giorni.reduce((sum, g) => sum + oreLavorateGiorno(emp.id, g.data), 0)
+            return ore > emp.ore_settimanali + 1
+          })
+        }).map(emp => (
+          <div key={emp.id} className="bg-red-50 border border-red-200 rounded-lg px-4 py-2 text-sm text-red-700 mb-2">
+            ⚠️ <strong>{emp.nome}</strong> ha ore in eccesso rispetto al contratto ({emp.ore_settimanali}h) — clicca su 🔍 Controlla turni
+          </div>
+        ))}
 
         {/* Tabella turni */}
         {shifts.length > 0 && (
