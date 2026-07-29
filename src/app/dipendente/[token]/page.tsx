@@ -22,6 +22,7 @@ export default function DipendenteePage() {
   const [resolvedScheduleId, setResolvedScheduleId] = useState<string | null>(null)
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set())
   const [motivo, setMotivo] = useState('')
+  const [tipoAssenza, setTipoAssenza] = useState('P')
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(true)
 
@@ -71,6 +72,8 @@ export default function DipendenteePage() {
       // Carica motivo se c'è un solo motivo comune (prendi il primo)
       const firstMotivo = unavRes?.[0]?.motivo
       if (firstMotivo) setMotivo(firstMotivo)
+      const firstTipo = unavRes?.[0]?.tipo_assenza
+      if (firstTipo) setTipoAssenza(firstTipo)
     }
 
     setLoading(false)
@@ -93,7 +96,8 @@ export default function DipendenteePage() {
         token,
         schedule_id: resolvedScheduleId,
         dates: Array.from(selectedDates),
-        motivo
+        motivo,
+        tipo_assenza: tipoAssenza,
       })
     })
     if (res.ok) setSaved(true)
@@ -135,6 +139,18 @@ export default function DipendenteePage() {
 
         {selectedDates.size > 0 && (
           <div className="bg-white rounded-2xl shadow-sm p-4 mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Tipo assenza
+            </label>
+            <select value={tipoAssenza} onChange={e => setTipoAssenza(e.target.value)}
+              className="w-full border rounded-lg px-3 py-2 text-sm mb-3">
+              <option value="P">P — Permesso</option>
+              <option value="F">F — Ferie</option>
+              <option value="R">R — Recupero</option>
+              <option value="M">M — Malattia</option>
+              <option value="MT">MT — Maternità</option>
+            </select>
+
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Motivo (opzionale)
             </label>

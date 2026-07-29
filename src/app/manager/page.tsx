@@ -170,6 +170,7 @@ export default function ManagerPage() {
   const [storicoAssenze, setStoricoAssenze] = useState<Unavailability[]>([])
   const [loadingStorico, setLoadingStorico] = useState(false)
   const [ferieSaldi, setFerieSaldi] = useState<Record<string, FerieSaldo>>({})
+  const [popupCell, setPopupCell] = useState<{ empId: string; data: string; x: number; y: number } | null>(null)
 
   const giorni = getDays(anno, mese)
   // Tabella: parte sempre da Lunedì — i giorni "orfani" prima del primo Lunedì del mese
@@ -622,6 +623,100 @@ export default function ManagerPage() {
     }
   }
 
+  /** Orari validi per cella MD, in base alle ore settimanali contrattuali del dipendente
+   * (evita che il click ciclico assegni un turno con più ore di quante ne consenta il contratto). */
+  function getOrariValidi(oreSettimanali: number): string[] {
+    const base = ['—'] // riposo sempre disponibile
+
+    if (oreSettimanali === 22) return [
+      ...base,
+      '08/11', '09/12', '10/13', // mattina 3h
+      '09/13', '10/14',           // mattina 4h
+      '08/13',                    // mattina 5h
+      '17/20',                    // pomeriggio 3h
+      '16/20',                    // pomeriggio 4h
+      '15/20',                    // pomeriggio 5h
+    ]
+
+    if (oreSettimanali === 28) return [
+      ...base,
+      '08/12', '09/13', '10/14', // mattina 4h
+      '08/13', '09/14',           // mattina 5h
+      '08/14',                    // mattina 6h
+      '16/20',                    // pomeriggio 4h
+      '15/20',                    // pomeriggio 5h
+      '14/20',                    // pomeriggio 6h
+    ]
+
+    if (oreSettimanali === 35) return [
+      ...base,
+      '08/13', '09/14',           // mattina 5h
+      '08/14',                    // mattina 6h
+      '15/20',                    // pomeriggio 5h
+      '14/20',                    // pomeriggio 6h
+    ]
+
+    if (oreSettimanali === 30) return [
+      // Max: sempre 5h fisso
+      '08/13',  // mattina 5h
+      '14/19',  // pomeriggio 5h
+      '—',
+    ]
+
+    if (oreSettimanali === 36) return [
+      ...base,
+      '08/14', // mattina 6h standard
+      '14/20', // pomeriggio 6h
+      '08/16', // yuri full
+      '13/16', // yuri salumeria
+    ]
+
+    // Default
+    return [...base, '08/14', '14/20', '08/20']
+  }
+
+  /** Converte l'orario scelto nel popup ("HH/HH" o "—") nel tipo turno + ora_inizio/ora_fine. */
+  function parseOrarioSelezionato(orario: string): { tipo: TurnoTipo; ora_inizio: string | null; ora_fine: string | null } {
+    if (orario === '—') return { tipo: 'riposo', ora_inizio: null, ora_fine: null }
+    const [iniN, finN] = orario.split('/').map(n => parseInt(n, 10))
+    const ora_inizio = `${String(iniN).padStart(2, '0')}:00`
+    const ora_fine = `${String(finN).padStart(2, '0')}:00`
+    if (iniN === 8 && finN === 16) return { tipo: 'yuri_full', ora_inizio, ora_fine }
+    if (iniN === 13 && finN === 16) return { tipo: 'yuri_pomeriggio', ora_inizio, ora_fine }
+    if (iniN === 8 && finN === 20) return { tipo: 'full', ora_inizio, ora_fine }
+    if (finN === 20) return { tipo: 'pomeriggio', ora_inizio, ora_fine }
+    return { tipo: 'mattina', ora_inizio, ora_fine }
+  }
+
+  async function handleCellSelect(empId: string, data: string, orario: string) {
+    if (!schedule) return
+    const { tipo, ora_inizio, ora_fine } = parseOrarioSelezionato(orario)
+    const existing = getShift(empId, data)
+
+    if (existing) {
+      setShifts(prev => prev.map(s => s.id === existing.id ? { ...s, tipo, ora_inizio: ora_inizio ?? undefined, ora_fine: ora_fine ?? undefined } : s))
+      await supabase.from('shifts').update({ tipo, ora_inizio, ora_fine }).eq('id', existing.id)
+    } else {
+      const optimistic: Shift = {
+        id: `temp-${empId}-${data}`,
+        schedule_id: schedule.id,
+        employee_id: empId,
+        data,
+        tipo,
+        ora_inizio: ora_inizio ?? undefined,
+        ora_fine: ora_fine ?? undefined,
+      }
+      setShifts(prev => [...prev, optimistic])
+      const { data: newShift } = await supabase.from('shifts')
+        .insert({ schedule_id: schedule.id, employee_id: empId, data, tipo, ora_inizio, ora_fine })
+        .select().single()
+      if (newShift) {
+        setShifts(prev => prev.map(s => s.id === `temp-${empId}-${data}` ? newShift : s))
+      }
+    }
+    setPopupCell(null)
+  }
+
   // Raggruppa unavailabilities per dipendente per il pannello
   const unavByEmployee = employees.reduce<Record<string, string[]>>((acc, emp) => {
     const dates = unavailabilities
@@ -870,9 +965,17 @@ export default function ManagerPage() {
                       })() : (
                         <td className={`p-1 text-center ${cellBg}`}>
                           <button
-                            onClick={() => !domenicaBloccata && cycleShift(emp.id, g.data)}
+                            onClick={(e) => {
+                              if (domenicaBloccata) return
+                              if (isMD) {
+                                const rect = e.currentTarget.getBoundingClientRect()
+                                setPopupCell({ empId: emp.id, data: g.data, x: rect.left, y: rect.bottom })
+                              } else {
+                                cycleShift(emp.id, g.data)
+                              }
+                            }}
                             disabled={domenicaBloccata}
-                            title={`Click per cambiare (attuale: ${tipo})`}
+                            title={isMD ? `Click per scegliere orario (attuale: ${tipo})` : `Click per cambiare (attuale: ${tipo})`}
                             className={`inline-block px-1 py-0.5 rounded hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap ${TURNO_COLOR[tipo]}`}>
                             {isMD && tipo !== 'riposo' ? (
                               <div className="flex flex-col items-center leading-tight">
@@ -925,6 +1028,27 @@ export default function ManagerPage() {
             </div>
           </div>
         )}
+
+        {/* Popup orari validi — sostituisce il click ciclico per MD (rispetta i limiti ore contratto) */}
+        {popupCell && (() => {
+          const emp = employees.find(e => e.id === popupCell.empId)
+          if (!emp) return null
+          return (
+            <>
+              <div className="fixed inset-0 z-[999]" onClick={() => setPopupCell(null)} />
+              <div style={{ position: 'fixed', top: popupCell.y, left: popupCell.x, zIndex: 1000 }}
+                className="bg-white border rounded-lg shadow-lg p-2 min-w-24 max-h-64 overflow-y-auto">
+                {getOrariValidi(emp.ore_settimanali).map(orario => (
+                  <button key={orario}
+                    className="block w-full text-left px-3 py-1 hover:bg-gray-100 text-sm rounded whitespace-nowrap"
+                    onClick={() => handleCellSelect(popupCell.empId, popupCell.data, orario)}>
+                    {orario}
+                  </button>
+                ))}
+              </div>
+            </>
+          )
+        })()}
 
         {/* Pannello permessi mensili */}
         {Object.keys(unavByEmployee).length > 0 && (

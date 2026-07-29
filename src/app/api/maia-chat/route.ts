@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabaseAdmin } from '@/lib/supabase'
 import { ORARI_TURNO_MD, TurnoTipo } from '@/types'
+import { oreFromOrario } from '@/lib/generator'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -55,6 +56,28 @@ const tools: Anthropic.Tool[] = [
         employee_name: { type: 'string' },
       },
       required: ['employee_name'],
+    },
+  },
+  {
+    name: 'set_assenza',
+    description: 'Assegna un\'assenza (Ferie, Permesso, Malattia, Recupero, Maternità) a un dipendente per uno o più giorni. USARE QUESTO tool invece di update_shift quando si tratta di assenze — update_shift è solo per turni lavorativi.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        employee_name: { type: 'string' },
+        date: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array di date YYYY-MM-DD',
+        },
+        tipo_assenza: {
+          type: 'string',
+          enum: ['F', 'P', 'R', 'M', 'MT'],
+          description: 'F=Ferie, P=Permesso, R=Recupero, M=Malattia, MT=Maternità',
+        },
+        motivo: { type: 'string', description: 'Motivo opzionale' },
+      },
+      required: ['employee_name', 'date', 'tipo_assenza'],
     },
   },
   {
@@ -186,6 +209,71 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (!shifts || shifts.length === 0) return `${emp.nome} non ha turni generati per questo mese.`
     const righe = shifts.map(s => `${s.data}: ${s.tipo}`).join('\n')
     return `Turni di ${emp.nome}:\n${righe}`
+  }
+
+  if (toolName === 'set_assenza') {
+    const emp = await findEmployee(input.employee_name, ctx.storeId)
+    if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
+    const dates: string[] = input.date
+    const tipoAssenza: string = input.tipo_assenza
+    if (!Array.isArray(dates) || dates.length === 0) return 'Errore: nessuna data specificata.'
+
+    let deltaFerieGiorni = 0
+    let deltaPermessiOre = 0
+
+    for (const d of dates) {
+      const { data: existingShift } = await supabaseAdmin
+        .from('shifts')
+        .select('ora_inizio, ora_fine')
+        .eq('schedule_id', ctx.scheduleId)
+        .eq('employee_id', emp.id)
+        .eq('data', d)
+        .maybeSingle()
+
+      if (tipoAssenza === 'P') {
+        deltaPermessiOre += oreFromOrario(existingShift?.ora_inizio, existingShift?.ora_fine)
+      }
+      if (tipoAssenza === 'F') deltaFerieGiorni += 1
+
+      await supabaseAdmin.from('unavailabilities').delete()
+        .eq('employee_id', emp.id).eq('schedule_id', ctx.scheduleId).eq('data', d)
+      await supabaseAdmin.from('unavailabilities').insert({
+        employee_id: emp.id,
+        schedule_id: ctx.scheduleId,
+        data: d,
+        tipo_assenza: tipoAssenza,
+        motivo: input.motivo || null,
+        inserito_da: 'maia',
+      })
+
+      await supabaseAdmin.from('shifts').upsert(
+        { schedule_id: ctx.scheduleId, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null },
+        { onConflict: 'schedule_id,employee_id,data' }
+      )
+    }
+
+    let avviso = ''
+    if (deltaFerieGiorni !== 0 || deltaPermessiOre !== 0) {
+      const annoRif = new Date(dates[0] + 'T00:00:00').getFullYear()
+      const { data: saldo } = await supabaseAdmin
+        .from('ferie_saldo').select('*').eq('employee_id', emp.id).eq('anno', annoRif).maybeSingle()
+      if (saldo) {
+        const nuoviGiorni = saldo.ferie_giorni_usati + deltaFerieGiorni
+        const nuoveOre = saldo.permessi_ore_usate + deltaPermessiOre
+        await supabaseAdmin.from('ferie_saldo').update({
+          ferie_giorni_usati: Math.max(0, nuoviGiorni),
+          permessi_ore_usate: Math.max(0, nuoveOre),
+        }).eq('id', saldo.id)
+
+        const ferieRimanenti = saldo.ferie_giorni_totali - nuoviGiorni
+        const permessiRimanenti = saldo.permessi_ore_totali - nuoveOre
+        if (ferieRimanenti < 0 || permessiRimanenti < 0) {
+          avviso = ` ⚠️ ATTENZIONE: saldo ora negativo (Ferie: ${ferieRimanenti.toFixed(2)}gg, Permessi: ${permessiRimanenti.toFixed(2)}h).`
+        }
+      }
+    }
+
+    return `OK: assenza "${tipoAssenza}" registrata per ${emp.nome} su ${dates.length} giorno/i (${dates.join(', ')}).${avviso}`
   }
 
   if (toolName === 'save_rule') {
@@ -333,6 +421,11 @@ Prima di confermare qualsiasi modifica ai turni, Maia DEVE verificare che:
 4. Nessun turno inizi prima delle 08:00
 
 Se una modifica richiesta violerebbe questi vincoli, Maia DEVE rifiutare e spiegare perché.
+
+⚠️ IMPORTANTE: Per assenze (Ferie/Permesso/Malattia/Recupero/Maternità) usa SEMPRE il tool
+set_assenza, MAI update_shift. Il tool update_shift è solo per turni lavorativi
+(mattina, pomeriggio, full). Esempio: "metti Angelica in ferie martedì 5" → set_assenza
+con tipo_assenza="F", NON update_shift con tipo="riposo".
 
 COMPORTAMENTO:
 - Rispondi sempre in italiano, sii concisa e pratica
