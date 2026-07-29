@@ -171,6 +171,9 @@ export default function ManagerPage() {
   const [loadingStorico, setLoadingStorico] = useState(false)
 
   const giorni = getDays(anno, mese)
+  // Tabella: parte sempre da Lunedì — i giorni "orfani" prima del primo Lunedì del mese
+  // (es. Sab 1 / Dom 2 di Agosto 2026) vengono spostati in fondo invece che in testa.
+  const giorniOrdinati = reorderGiorniLunFirst(giorni)
   const isMD = storeNome === MD_LANCIANO_STORE_NOME
 
   useEffect(() => {
@@ -423,14 +426,14 @@ export default function ManagerPage() {
   }
 
   async function exportPDFSettimana() {
-    const input = window.prompt('Quale settimana vuoi esportare? (1-5)')
-    const settimana = parseInt(input ?? '', 10)
-    if (!settimana || settimana < 1 || settimana > 5) return
-    const startDay = (settimana - 1) * 7 + 1
-    const endDay = settimana * 7
-    const giorniSettimana = giorni.filter(g => g.num >= startDay && g.num <= endDay)
-    if (giorniSettimana.length === 0) { alert('Settimana non valida per questo mese.'); return }
-    await exportPDF(giorniSettimana, `Settimana ${settimana}`)
+    const settimane = getSettimaneLunDom(giorni, mese)
+    if (settimane.length === 0) { alert('Nessuna settimana disponibile per questo mese.'); return }
+    const elenco = settimane.map((s, i) => `${i + 1}: ${s.label}`).join('\n')
+    const input = window.prompt(`Quale settimana vuoi esportare?\n${elenco}`)
+    const idx = parseInt(input ?? '', 10)
+    if (!idx || idx < 1 || idx > settimane.length) return
+    const settimana = settimane[idx - 1]
+    await exportPDF(settimana.giorni, `Settimana ${idx}`)
   }
 
   function hasUnavailability(empId: string, data: string) {
@@ -763,7 +766,7 @@ export default function ManagerPage() {
               <thead>
                 <tr className="border-b">
                   <th className="text-left p-3 font-semibold text-gray-700 sticky left-0 bg-white min-w-32">Dipendente</th>
-                  {giorni.map(g => (
+                  {giorniOrdinati.map(g => (
                     <Fragment key={g.data}>
                       <th className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'}`}>
                         <div className="text-xs">{g.giorno}</div>
@@ -789,7 +792,7 @@ export default function ManagerPage() {
                         </div>
                       </button>
                     </td>
-                    {giorni.map(g => {
+                    {giorniOrdinati.map(g => {
                       const shift = getShift(emp.id, g.data)
                       const tipo = shift?.tipo || 'riposo'
                       const isPermesso = hasUnavailability(emp.id, g.data)
@@ -1046,4 +1049,33 @@ function getDays(anno: number, mese: number) {
     d.setDate(d.getDate() + 1)
   }
   return days
+}
+
+/** Riordina i giorni del mese in modo che il primo Lunedì venga per primo — i giorni
+ * "orfani" prima del primo Lunedì (es. Sab 1 / Dom 2 se il mese inizia di Sabato)
+ * vengono spostati in fondo invece che restare in testa alla tabella. */
+function reorderGiorniLunFirst(giorni: ReturnType<typeof getDays>): ReturnType<typeof getDays> {
+  const firstMondayIdx = giorni.findIndex(g => new Date(g.data + 'T00:00:00').getDay() === 1)
+  if (firstMondayIdx <= 0) return giorni
+  return [...giorni.slice(firstMondayIdx), ...giorni.slice(0, firstMondayIdx)]
+}
+
+/** Settimane reali Lun-Dom del mese (per il PDF settimanale) — sempre a partire dal
+ * primo Lunedì del mese, gruppi di 7 giorni consecutivi che finiscono di Domenica. */
+function getSettimaneLunDom(giorni: ReturnType<typeof getDays>, mese: number): { label: string; giorni: ReturnType<typeof getDays> }[] {
+  const firstMondayIdx = giorni.findIndex(g => new Date(g.data + 'T00:00:00').getDay() === 1)
+  const start = firstMondayIdx === -1 ? 0 : firstMondayIdx
+  const nomeMese = MESI[mese - 1]
+  const settimane: { label: string; giorni: ReturnType<typeof getDays> }[] = []
+  for (let i = start; i < giorni.length; i += 7) {
+    const chunk = giorni.slice(i, i + 7)
+    if (chunk.length === 0) continue
+    const primo = chunk[0]
+    const ultimo = chunk[chunk.length - 1]
+    settimane.push({
+      label: `${primo.giorno} ${primo.num} — ${ultimo.giorno} ${ultimo.num} ${nomeMese}`,
+      giorni: chunk,
+    })
+  }
+  return settimane
 }
