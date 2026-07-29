@@ -537,7 +537,23 @@ export default function ManagerPage() {
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-6">
-          <h1 className="text-2xl font-bold text-gray-800">📅 Gestione Turni</h1>
+          {isMD ? (
+            <div className="flex items-center gap-3">
+              <img
+                src="/MD_Italia_Logo.svg.jpg"
+                alt="MD Logo"
+                className="h-12 w-auto"
+              />
+              <div>
+                <h1 className="text-xl font-bold text-gray-800 leading-tight">
+                  Generatore di Turni — Lanciano
+                </h1>
+                <p className="text-xs text-gray-400">by Maia &amp; Giacomo</p>
+              </div>
+            </div>
+          ) : (
+            <h1 className="text-2xl font-bold text-gray-800">📅 Gestione Turni</h1>
+          )}
           <button onClick={logout}
             className="text-sm text-gray-500 hover:text-gray-700 border rounded-lg px-3 py-1.5 hover:bg-gray-50 transition">
             Esci
@@ -745,8 +761,15 @@ export default function ManagerPage() {
                             onClick={() => !domenicaBloccata && cycleShift(emp.id, g.data)}
                             disabled={domenicaBloccata}
                             title={`Click per cambiare (attuale: ${tipo})`}
-                            className={`inline-block px-1 py-0.5 rounded text-xs font-bold hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap ${TURNO_COLOR[tipo]}`}>
-                            {getTurnoDisplay(tipo, isMD)}
+                            className={`inline-block px-1 py-0.5 rounded hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap ${TURNO_COLOR[tipo]}`}>
+                            {isMD && tipo !== 'riposo' ? (
+                              <div className="flex flex-col items-center leading-tight">
+                                <span className="text-xs font-bold text-gray-500">{ORE_PER_TURNO[tipo] ?? 0}h</span>
+                                <span className="text-xs font-medium">{getTurnoDisplay(tipo, isMD)}</span>
+                              </div>
+                            ) : (
+                              <span className="text-xs font-bold">{getTurnoDisplay(tipo, isMD)}</span>
+                            )}
                           </button>
                         </td>
                       )
