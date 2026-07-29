@@ -1,6 +1,6 @@
 import {
   Employee, Shift, Unavailability, TurnoTipo, ORE_TURNO,
-  ORE_TURNO_MD, ORARI_TURNO_MD, MD_LANCIANO_STORE_NOME,
+  ORARI_TURNO_MD, MD_LANCIANO_STORE_NOME,
 } from '@/types'
 
 // Ore settimanali → ore mensili approssimate (Stroili)
@@ -118,40 +118,82 @@ function getTurnoOrario(tipo: TurnoTipo) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ALGORITMO MD LANCIANO — R1-R7 (domenica ESCLUSA — vedi nota sotto)
+// ALGORITMO MD LANCIANO — ore esatte (numeri interi) + vincoli orario negozio
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // DOMENICA: non gestita da questo algoritmo. Ogni domenica è sempre "riposo" di
 // default per tutti — i turni domenicali (domenica_lungo/domenica_corto) vengono
-// assegnati SOLO manualmente da Giacomo (click sulla cella o tramite Maia), incluso
-// il relativo riposo compensativo durante la settimana. Vedi system prompt di Maia
-// in src/app/api/maia-chat/route.ts per le regole domenicali complete.
+// assegnati SOLO manualmente da Giacomo (click sulla cella o tramite Maia).
 //
+// VINCOLI ORARIO NEGOZIO (assoluti): apertura 08:00, chiusura 20:00.
+// - Turno mattina: inizio 08:00, fine = 08:00 + ore (start-anchored)
+// - Turno mattina cassiere 22h: FINE fissa alle 13:00, inizio = 13:00 - ore
+//   (end-anchored — coerente con gli esempi forniti: 3h→10/13, 4h→9/13, 5h→8/13)
+// - Turno pomeriggio: fine sempre 20:00, inizio = 20:00 - ore (end-anchored)
+//   → soddisfa automaticamente "mai iniziare oltre le 17:00" per ore ≥ 3h
+//
+// Distribuzione ore intere sui 5 giorni feriali (Lun-Ven) — il Sabato ha ore fisse
+// per contratto e viene sottratto PRIMA di distribuire il resto:
+const CONFIG_ORE_CONTRATTO: Record<number, { sabato: number; min: number; max: number }> = {
+  22: { sabato: 5, min: 3, max: 5 },
+  28: { sabato: 6, min: 4, max: 6 },
+  30: { sabato: 6, min: 4, max: 6 }, // Cristina — per analogia con 28h, non specificato esplicitamente
+  35: { sabato: 6, min: 5, max: 6 },
+  36: { sabato: 6, min: 6, max: 6 }, // Gilda/Tony — fisso, nessuna variazione (gestito comunque da R1)
+}
+
+/** Distribuisce ore intere su N giorni, rispettando min/max giornaliero. */
+function distribuisciOre(oreRimanenti: number, giorni: number, min: number, max: number): number[] {
+  const result: number[] = []
+  let rimanenti = oreRimanenti
+  for (let i = giorni; i > 0; i--) {
+    if (rimanenti <= 0) { result.push(0); continue }
+    const oreGiorno = Math.min(max, Math.max(min, Math.ceil(rimanenti / i)))
+    result.push(oreGiorno)
+    rimanenti -= oreGiorno
+  }
+  return result
+}
+
+/** Orario mattina standard: inizio 08:00 fisso, fine = 08:00 + ore. */
+function orarioMattina(ore: number): { inizio: string; fine: string } {
+  return { inizio: '08:00', fine: formatOra(8 + ore) }
+}
+
+/** Orario mattina cassiere 22h: fine fissa 13:00, inizio flessibile = 13:00 - ore. */
+function orarioMattinaFlessibile(ore: number): { inizio: string; fine: string } {
+  return { inizio: formatOra(13 - ore), fine: '13:00' }
+}
+
+/** Orario pomeriggio: fine sempre 20:00 (chiusura negozio), inizio = 20:00 - ore. */
+function orarioPomeriggio(ore: number): { inizio: string; fine: string } {
+  return { inizio: formatOra(20 - ore), fine: '20:00' }
+}
+
+function formatOra(h: number): string {
+  return `${String(Math.floor(h)).padStart(2, '0')}:00`
+}
+
+/** Ore lavorate calcolate dagli orari effettivi (non da un lookup fisso per tipo). */
+export function oreFromOrario(inizio?: string | null, fine?: string | null): number {
+  if (!inizio || !fine) return 0
+  const [hi, mi] = inizio.split(':').map(Number)
+  const [hf, mf] = fine.split(':').map(Number)
+  return (hf * 60 + mf - (hi * 60 + mi)) / 60
+}
+
 // NOTE — semplificazioni rispetto alla specifica ideale (documentate esplicitamente):
 // - R6/R7 (copertura minima cassieri fascia 13-16 e chiusura 20:00, min. 3/4 persone):
 //   NON verificate algoritmicamente giorno per giorno — vanno controllate a vista dopo
 //   la generazione. Servirebbe un vero constraint solver per garantirle in automatico.
-// - Budget ore ORA è SETTIMANALE (per settimana ISO), non più una media mensile — questo
-//   fix risolve il bug per cui alcuni dipendenti (es. Angelica 22h, Romeo 28h) finivano
-//   sistematicamente sopra le ore contrattuali: prima il pacing guardava la media
-//   dell'intero mese residuo, quindi un dipendente poteva lavorare troppo nelle prime
-//   settimane senza che l'algoritmo se ne accorgesse fino a fine mese.
-// - R4 (22h) e R3/Romeo: dato che 22h e 28h non sono multipli esatti di 6h (un turno
-//   standard), il rispetto rigoroso del tetto settimanale implica che quella settimana
-//   la persona lavori qualche ora IN MENO del contratto invece di sforare (es. Stefania
-//   28h ÷ 6h/turno = 4 giorni pieni = 24h, non 28h esatte) — è una conseguenza aritmetica
-//   inevitabile con turni da 6h fissi, non un bug: non può mai sforare, può restare
-//   leggermente sotto in singole settimane.
-// - R5 (Cristina/Stefania): "3 mattine + 3 pomeriggi a settimana" resta su giorni fissi
-//   (Lun/Mer/Ven mattina, Mar/Gio/Sab pomeriggio), ma ora si ferma quando il budget
-//   settimanale è esaurito invece di aspettare la fine del mese.
-// - R4 (22h): rotazione a coppie tramite (giorno_del_mese + indice) % 4 per variare chi
-//   fa mattina/pomeriggio, ma ora soggetta anche al budget settimanale — quando qualcuno
-//   del gruppo va in riposo per budget, la copertura "sempre 2+2" può scendere sotto 2
-//   per quel giorno: è il trade-off inevitabile tra "22h contrattuali rispettate" e
-//   "copertura 2+2 garantita ogni giorno", matematicamente non sempre compatibili
-//   (22h ÷ 6h ≈ 3.7 giorni/settimana per persona, quindi in media non tutti e 4 presenti
-//   ogni giorno). Segnalare a Giacomo se la copertura risulta insufficiente a vista.
+// - 30h (Cristina): il brief non specifica esplicitamente sabato/min/max per questo
+//   contratto — ho usato gli stessi parametri del 28h per analogia (sabato 6h, 4-6h/gg).
+// - Carlo (35h): Mar/Gio restano obbligatoriamente mattina come da R2, ma le ORE di quei
+//   due giorni vengono comunque prese dalla distribuzione settimanale (non sono extra).
+// - Direzione mattina/pomeriggio per Cristina/Stefania resta sui giorni fissi
+//   (Lun/Mer/Ven mattina, Mar/Gio/Sab pomeriggio); per le 22h resta la rotazione a
+//   coppie (giorno+indice)%4; per Romeo resta l'alternanza settimanale con Max.
+//   Solo le ORE per ogni giorno ora vengono dalla distribuzione intera, non più fisse a 6h.
 //
 function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_at'>[] {
   const { scheduleId, employees, unavailabilities, mese, anno } = params
@@ -165,24 +207,35 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
     unavailMap[u.employee_id].add(u.data)
   }
 
-  // Budget ore SETTIMANALE (non mensile) — chiave: `${employeeId}_${isoWeek}`
-  const oreSettimana: Record<string, number> = {}
-  const weekKey = (empId: string, week: number) => `${empId}_${week}`
-  const oreSettimanaCorrente = (empId: string, week: number) => oreSettimana[weekKey(empId, week)] ?? 0
-  const registraOre = (empId: string, week: number, ore: number) => {
-    oreSettimana[weekKey(empId, week)] = oreSettimanaCorrente(empId, week) + ore
-  }
-
   const cassieri22 = employees.filter(e => e.priorita_cassa === 1)
+
+  // Per ogni dipendente con distribuzione variabile, precalcola il piano ore Lun-Ven
+  // PER SETTIMANA ISO (si ricalcola ogni volta che cambia settimana, azzerando il piano).
+  const pianoSettimanale: Record<string, { settimana: number; oreGiorni: number[]; usati: number }> = {}
+
+  function getPianoGiorno(emp: Employee, settimana: number, weekdayIdx: number): number {
+    // weekdayIdx: 0=Lun,1=Mar,2=Mer,3=Gio,4=Ven
+    const key = emp.id
+    const cfg = CONFIG_ORE_CONTRATTO[emp.ore_settimanali]
+    if (!cfg) return 6 // fallback
+
+    let piano = pianoSettimanale[key]
+    if (!piano || piano.settimana !== settimana) {
+      const oreRimanenti = Math.max(0, emp.ore_settimanali - cfg.sabato)
+      piano = { settimana, oreGiorni: distribuisciOre(oreRimanenti, 5, cfg.min, cfg.max), usati: 0 }
+      pianoSettimanale[key] = piano
+    }
+    return piano.oreGiorni[weekdayIdx] ?? 0
+  }
 
   for (const giorno of giorni) {
     const dataStr = formatDate(giorno)
     const dayOfWeek = giorno.getDay() // 0=domenica, 1=lunedì ... 6=sabato
     const settimana = getIsoWeek(giorno)
     const weekIsEven = settimana % 2 === 0
+    const weekdayIdx = dayOfWeek - 1 // 0=Lun..4=Ven (Sabato=5 non usato qui)
 
     // ── Domenica: riposo per tutti — nessuna assegnazione automatica.
-    // I turni domenicali li assegna solo Giacomo manualmente (cella o Maia).
     if (dayOfWeek === 0) {
       for (const emp of employees) {
         shifts.push({ schedule_id: scheduleId, employee_id: emp.id, data: dataStr, tipo: 'riposo' })
@@ -198,78 +251,99 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
         continue
       }
 
-      const margineSettimana = emp.ore_settimanali - oreSettimanaCorrente(emp.id, settimana)
+      let tipo: TurnoTipo = 'riposo'
+      let orario: { inizio: string; fine: string } | null = null
 
-      let tipo: TurnoTipo
-
-      // R1 — Gilda e Tony: sempre mattina, mai domenica (già escluse sopra).
-      // 6h × 6 giorni = 36h/settimana = contratto esatto, nessun pacing necessario.
+      // R1 — Gilda e Tony: sempre mattina 08:00-14:00, mai domenica (già escluse sopra).
       if (emp.turno_fisso === 'mattina') {
         tipo = 'mattina'
+        orario = orarioMattina(6)
       }
-      // R2 — Carlo: Mar/Gio obbligatoriamente mattina; altri giorni preferenza
-      // mattina, pomeriggio solo se il margine settimanale residuo lo richiede.
-      else if (emp.nome === 'Carlo') {
-        if (dayOfWeek === 2 || dayOfWeek === 4) {
-          tipo = 'mattina'
-        } else if (margineSettimana < 3) {
-          tipo = 'riposo'
-        } else if (margineSettimana >= 9) {
-          tipo = 'pomeriggio' // molto margine rimasto: bilancia più in fretta
-        } else {
-          tipo = 'mattina' // preferenza standard
-        }
-      }
-      // R1 — Yuri: Lun/Mer/Ven turno lungo 08-16, Mar/Gio pomeriggio corto 13-16
-      // (mattina in salumeria), Sabato mattina standard 08-14. Mai pomeriggio pieno.
-      // Fisso da regola assoluta — nessun pacing (vedi nota sopra sul mismatch 30h/36h).
+      // R1 — Yuri: Lun/Mer/Ven 08-16, Mar/Gio 13-16 (mattina in salumeria), Sab 08-14.
+      // Regola assoluta fissa — non passa dalla distribuzione ore intere.
       else if (emp.nome === 'Yuri') {
-        if (dayOfWeek === 1 || dayOfWeek === 3 || dayOfWeek === 5) tipo = 'yuri_full'
-        else if (dayOfWeek === 2 || dayOfWeek === 4) tipo = 'yuri_pomeriggio'
-        else tipo = 'mattina' // sabato (dayOfWeek === 6)
+        if (dayOfWeek === 1 || dayOfWeek === 3 || dayOfWeek === 5) { tipo = 'yuri_full'; orario = ORARI_TURNO_MD.yuri_full! }
+        else if (dayOfWeek === 2 || dayOfWeek === 4) { tipo = 'yuri_pomeriggio'; orario = ORARI_TURNO_MD.yuri_pomeriggio! }
+        else { tipo = 'mattina'; orario = orarioMattina(6) } // sabato
       }
-      // R3 — Alternanza Max/Romeo (gruppo AB), a settimane alterne.
-      // Max: turni corti da 5h × 6gg = 30h/settimana = contratto esatto, nessun pacing.
-      // Romeo: turni standard da 6h, CON pacing settimanale (28h contrattuali).
+      // R3 — Alternanza Max/Romeo. Max: 5h fisse (regola propria, mattina_corta/pomeriggio_corto).
       else if (emp.alternanza_gruppo === 'AB') {
         const isMax = emp.nome === 'Max'
         const mattinaOra = weekIsEven ? isMax : !isMax
         if (isMax) {
           tipo = mattinaOra ? 'mattina_corta' : 'pomeriggio_corto'
-        } else if (margineSettimana < 5) {
-          tipo = 'riposo'
-        } else {
+          orario = ORARI_TURNO_MD[tipo]!
+        } else if (dayOfWeek === 6) {
+          // Sabato Romeo: 6h fisse (28h) — direzione di default mattina
           tipo = mattinaOra ? 'mattina' : 'pomeriggio'
+          orario = mattinaOra ? orarioMattina(6) : orarioPomeriggio(6)
+        } else {
+          const ore = getPianoGiorno(emp, settimana, weekdayIdx)
+          if (ore <= 0) { tipo = 'riposo'; orario = null }
+          else {
+            tipo = mattinaOra ? 'mattina' : 'pomeriggio'
+            orario = mattinaOra ? orarioMattina(ore) : orarioPomeriggio(ore)
+          }
         }
       }
-      // R4 — 22h: 2 mattina + 2 pomeriggio quando in servizio, coppia a rotazione,
-      // MA soggetto al budget settimanale di 22h (vedi nota sul trade-off di copertura).
+      // R2 — Carlo (35h): Mar/Gio obbligatoriamente mattina, altri giorni preferenza mattina.
+      else if (emp.nome === 'Carlo') {
+        if (dayOfWeek === 6) {
+          tipo = 'mattina'
+          orario = orarioMattina(6) // sabato fisso 6h
+        } else {
+          const ore = getPianoGiorno(emp, settimana, weekdayIdx)
+          if (ore <= 0) { tipo = 'riposo'; orario = null }
+          else { tipo = 'mattina'; orario = orarioMattina(ore) } // sempre preferenza mattina
+        }
+      }
+      // R4 — Cassiere 22h: rotazione a coppie mattina/pomeriggio, ore variabili da distribuzione.
+      // Mattina = orario flessibile end-anchored a 13:00 (vedi orarioMattinaFlessibile).
       else if (emp.priorita_cassa === 1) {
-        if (margineSettimana < 5) {
-          tipo = 'riposo'
+        const idx = cassieri22.findIndex(e => e.id === emp.id)
+        const mattinaOra = (giorno.getDate() + idx) % 4 < 2
+        if (dayOfWeek === 6) {
+          // Sabato: sempre 5h, sempre mattina 08:00-13:00 (regola fissa)
+          tipo = 'mattina'
+          orario = { inizio: '08:00', fine: '13:00' }
         } else {
-          const idx = cassieri22.findIndex(e => e.id === emp.id)
-          const dayIndex = giorno.getDate()
-          tipo = (dayIndex + idx) % 4 < 2 ? 'mattina' : 'pomeriggio'
+          const ore = getPianoGiorno(emp, settimana, weekdayIdx)
+          if (ore <= 0) { tipo = 'riposo'; orario = null }
+          else {
+            tipo = mattinaOra ? 'mattina' : 'pomeriggio'
+            orario = mattinaOra ? orarioMattinaFlessibile(ore) : orarioPomeriggio(ore)
+          }
         }
       }
-      // R5 — Cristina (30h) e Stefania (28h): 3 mattine + 3 pomeriggi fissi a settimana,
-      // con pacing settimanale (si ferma quando il budget di quella settimana è esaurito).
+      // R5 — Cristina (30h) e Stefania (28h): giorni fissi Lun/Mer/Ven mattina, Mar/Gio/Sab pomeriggio.
       else if (emp.priorita_cassa === 2 || emp.priorita_cassa === 3) {
-        if (margineSettimana < 5) {
-          tipo = 'riposo'
+        const mattinaGiorni = [1, 3, 5]
+        const mattinaOra = mattinaGiorni.includes(dayOfWeek)
+        if (dayOfWeek === 6) {
+          tipo = 'pomeriggio'
+          orario = orarioPomeriggio(6) // sabato fisso 6h
         } else {
-          const mattinaGiorni = [1, 3, 5] // Lun, Mer, Ven
-          tipo = mattinaGiorni.includes(dayOfWeek) ? 'mattina' : 'pomeriggio'
+          const ore = getPianoGiorno(emp, settimana, weekdayIdx)
+          if (ore <= 0) { tipo = 'riposo'; orario = null }
+          else {
+            tipo = mattinaOra ? 'mattina' : 'pomeriggio'
+            orario = mattinaOra ? orarioMattina(ore) : orarioPomeriggio(ore)
+          }
         }
       }
-      // Fallback greedy per eventuali dipendenti non coperti dalle regole sopra
+      // Fallback per eventuali dipendenti non coperti dalle regole sopra
       else {
-        tipo = margineSettimana >= 5 ? (dayOfWeek % 2 === 0 ? 'mattina' : 'pomeriggio') : 'riposo'
+        const cfg = CONFIG_ORE_CONTRATTO[emp.ore_settimanali]
+        const oreDef = cfg ? Math.round((emp.ore_settimanali - cfg.sabato) / 5) : 6
+        if (dayOfWeek === 6 && cfg) {
+          tipo = 'mattina'
+          orario = orarioMattina(cfg.sabato)
+        } else {
+          tipo = dayOfWeek % 2 === 0 ? 'mattina' : 'pomeriggio'
+          orario = tipo === 'mattina' ? orarioMattina(oreDef) : orarioPomeriggio(oreDef)
+        }
       }
 
-      registraOre(emp.id, settimana, ORE_TURNO_MD[tipo])
-      const orario = tipo !== 'riposo' ? ORARI_TURNO_MD[tipo] : null
       shifts.push({
         schedule_id: scheduleId,
         employee_id: emp.id,

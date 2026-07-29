@@ -3,7 +3,7 @@ import { supabaseAdmin } from '@/lib/supabase'
 
 // POST: dipendente salva le sue indisponibilità
 export async function POST(req: NextRequest) {
-  const { token, schedule_id, dates, motivo } = await req.json()
+  const { token, schedule_id, dates, motivo, tipo_assenza, inserito_da } = await req.json()
 
   // Verifica token
   const { data: employee } = await supabaseAdmin
@@ -23,7 +23,9 @@ export async function POST(req: NextRequest) {
       employee_id: employee.id,
       schedule_id,
       data,
-      motivo: motivo || null
+      motivo: motivo || null,
+      tipo_assenza: tipo_assenza || 'P',
+      inserito_da: inserito_da || 'dipendente',
     }))
     const { error } = await supabaseAdmin.from('unavailabilities').insert(rows)
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })

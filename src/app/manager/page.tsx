@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME } from '@/types'
 import MaiaChatBubble from '@/components/MaiaChatBubble'
+import { oreFromOrario } from '@/lib/generator'
 
 const MESI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
                'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre']
@@ -58,7 +59,7 @@ const ORE_PER_TURNO: Record<string, number> = {
 }
 
 const ASSENZA_LABEL: Record<string, string> = {
-  PR: 'Permesso Richiesto', FE: 'Ferie', P: 'Permesso', R: 'Recupero', ML: 'Malattia', MT: 'Maternità',
+  P: 'Permesso', F: 'Ferie', R: 'Recupero', M: 'Malattia', MT: 'Maternità',
 }
 
 // Orari reali MD Lanciano — mostrati in cella invece delle lettere, SOLO per MD.
@@ -71,9 +72,29 @@ const TURNO_ORARIO_MD: Record<string, string> = {
   riposo: '—',
 }
 
-function getTurnoDisplay(tipo: string, isMD: boolean): string {
-  if (isMD) return TURNO_ORARIO_MD[tipo] ?? TURNO_LABEL[tipo] ?? tipo
+function formatOraShort(time?: string | null): string {
+  if (!time) return ''
+  return time.split(':')[0]
+}
+
+/** Mostra l'orario REALE del turno (da ora_inizio/ora_fine, ore intere variabili) —
+ * fallback al lookup fisso solo se i tempi non sono stati salvati (righe legacy). */
+function getTurnoDisplay(tipo: string, isMD: boolean, shift?: { ora_inizio?: string | null; ora_fine?: string | null }): string {
+  if (isMD) {
+    if (tipo !== 'riposo' && shift?.ora_inizio && shift?.ora_fine) {
+      return `${formatOraShort(shift.ora_inizio)}/${formatOraShort(shift.ora_fine)}`
+    }
+    return TURNO_ORARIO_MD[tipo] ?? TURNO_LABEL[tipo] ?? tipo
+  }
   return TURNO_LABEL[tipo] ?? tipo
+}
+
+/** Ore effettive lavorate — calcolate dagli orari reali del turno, non da un lookup fisso,
+ * perché con la distribuzione a ore intere le ore variano giorno per giorno. */
+function getOreDisplay(tipo: string, shift?: { ora_inizio?: string | null; ora_fine?: string | null }): number {
+  if (tipo === 'riposo') return 0
+  const fromTimes = oreFromOrario(shift?.ora_inizio, shift?.ora_fine)
+  return fromTimes > 0 ? fromTimes : (ORE_PER_TURNO[tipo] ?? 0)
 }
 
 /** Prossimo turno nel ciclo di click — comportamento diverso per MD Lanciano (turni fissi, domenica attiva). */
@@ -109,6 +130,9 @@ interface Unavailability {
   schedule_id: string
   data: string
   motivo: string | null
+  tipo_assenza?: string | null
+  inserito_da?: string | null
+  created_at?: string
 }
 
 export default function ManagerPage() {
@@ -134,6 +158,9 @@ export default function ManagerPage() {
   const [modalMotivo, setModalMotivo] = useState('')
   const [modalSaved, setModalSaved] = useState(false)
   const [modalSaving, setModalSaving] = useState(false)
+  const [modalTipoAssenza, setModalTipoAssenza] = useState('P')
+  const [storicoAssenze, setStoricoAssenze] = useState<Unavailability[]>([])
+  const [loadingStorico, setLoadingStorico] = useState(false)
 
   const giorni = getDays(anno, mese)
   const isMD = storeNome === MD_LANCIANO_STORE_NOME
@@ -163,7 +190,21 @@ export default function ManagerPage() {
     setModalSelected(new Set(dates))
     const firstMotivo = unavailabilities.find(u => u.employee_id === dettaglioEmp.id)?.motivo
     setModalMotivo(firstMotivo ?? '')
+    const firstTipo = unavailabilities.find(u => u.employee_id === dettaglioEmp.id)?.tipo_assenza
+    setModalTipoAssenza(firstTipo ?? 'P')
     setModalSaved(false)
+
+    // Storico assenze completo (tutti i mesi, non solo lo schedule corrente)
+    setLoadingStorico(true)
+    supabase.from('unavailabilities')
+      .select('*')
+      .eq('employee_id', dettaglioEmp.id)
+      .order('data', { ascending: false })
+      .limit(50)
+      .then(({ data }) => {
+        setStoricoAssenze(data || [])
+        setLoadingStorico(false)
+      })
   }, [dettaglioEmp])
 
   async function loadData() {
@@ -309,7 +350,7 @@ export default function ManagerPage() {
           row.push(getAssenzaCode(emp.id, g.data))
         } else {
           const shift = getShift(emp.id, g.data)
-          row.push(getTurnoDisplay(shift?.tipo || 'riposo', isMD))
+          row.push(getTurnoDisplay(shift?.tipo || 'riposo', isMD, shift))
         }
         if (isMD && g.domenica) {
           row.push(`${totSettimana(emp.id, g.data)}h`)
@@ -329,8 +370,10 @@ export default function ManagerPage() {
         if (data.section === 'body' && data.column.index > 0) {
           const val = data.cell.raw as string
           // Assenze — sempre lettera, indipendentemente da MD/Stroili
-          if (['PR', 'FE', 'P', 'R', 'MT'].includes(val)) { data.cell.styles.fillColor = [254, 243, 199]; return }
-          if (val === 'ML') { data.cell.styles.fillColor = [254, 226, 226]; return }
+          if (['P', 'F', 'R', 'MT'].includes(val)) { data.cell.styles.fillColor = [254, 243, 199]; return }
+          // 'M' è ambiguo: assenza "Malattia" per MD, ma turno "Mattina" per Stroili
+          // (che mostra ancora lettere in cella) — per MD coloriamo come assenza (rosso).
+          if (val === 'M' && isMD) { data.cell.styles.fillColor = [254, 226, 226]; return }
 
           // Colonna TOT (es. "22h") — verde/rosso in base allo scarto dal contratto settimanale
           const totMatch = isMD ? val.match(/^(\d+)h$/) : null
@@ -386,16 +429,16 @@ export default function ManagerPage() {
     return unavailabilities.some(u => u.employee_id === empId && u.data === data)
   }
 
-  // Codice assenza codificato come prefisso "[FE] ..." dentro il campo motivo.
-  // Default 'PR' (Permesso Richiesto) quando non è stato scelto un tipo specifico.
-  // NOTA: Ferie usa 'FE' (non 'F', già usato dal turno "full") e Malattia usa 'ML'
-  // (non 'M', già usato dal turno "Mattina") — evita ambiguità in tabella/PDF/legenda.
-  const ASSENZA_CYCLE = ['PR', 'FE', 'P', 'R', 'ML', 'MT'] as const
+  // Tipo di assenza — colonna reale `tipo_assenza` (default 'P').
+  // NOTA IMPORTANTE: 'F' (Ferie) e 'M' (Malattia) letteralmente richiesti, ma collidono
+  // visivamente con 'F'=turno "full" e 'M'=turno "Mattina" nella legenda/tabella di
+  // Stroili (che mostra ancora lettere per i turni, non orari). Per MD non c'è ambiguità
+  // — le celle turno mostrano orari, non lettere. Segnalato, non bloccante.
+  const ASSENZA_CYCLE = ['P', 'F', 'R', 'M', 'MT'] as const
 
   function getAssenzaCode(empId: string, data: string): string {
     const u = unavailabilities.find(x => x.employee_id === empId && x.data === data)
-    const match = u?.motivo?.match(/^\[(FE|P|R|ML|MT)\]/)
-    return match ? match[1] : 'PR'
+    return u?.tipo_assenza ?? 'P'
   }
 
   async function cycleAssenza(empId: string, data: string) {
@@ -404,10 +447,8 @@ export default function ManagerPage() {
     const current = getAssenzaCode(empId, data)
     const idx = ASSENZA_CYCLE.indexOf(current as typeof ASSENZA_CYCLE[number])
     const next = ASSENZA_CYCLE[(idx + 1) % ASSENZA_CYCLE.length]
-    const restoMotivo = (u.motivo ?? '').replace(/^\[(FE|P|R|ML|MT)\]\s*/, '')
-    const nuovoMotivo = next === 'PR' ? restoMotivo : `[${next}] ${restoMotivo}`.trim()
-    await supabase.from('unavailabilities').update({ motivo: nuovoMotivo || null }).eq('id', u.id)
-    setUnavailabilities(prev => prev.map(x => x.id === u.id ? { ...x, motivo: nuovoMotivo || null } : x))
+    await supabase.from('unavailabilities').update({ tipo_assenza: next }).eq('id', u.id)
+    setUnavailabilities(prev => prev.map(x => x.id === u.id ? { ...x, tipo_assenza: next } : x))
   }
 
   // ── Colonna TOT settimanale (solo MD) ────────────────────────────────────
@@ -419,7 +460,7 @@ export default function ManagerPage() {
   function oreLavorateGiorno(empId: string, data: string): number {
     if (hasUnavailability(empId, data)) return 0 // assenza = 0h lavorate
     const shift = getShift(empId, data)
-    return ORE_PER_TURNO[shift?.tipo ?? 'riposo'] ?? 0
+    return getOreDisplay(shift?.tipo ?? 'riposo', shift)
   }
 
   /** Somma le ore lavorate nei (fino a) 7 giorni che terminano con la domenica `sundayData`. */
@@ -460,6 +501,8 @@ export default function ManagerPage() {
         schedule_id: schedule.id,
         dates: Array.from(modalSelected),
         motivo: modalMotivo,
+        tipo_assenza: modalTipoAssenza,
+        inserito_da: 'manager',
       }),
     })
     setModalSaving(false)
@@ -764,11 +807,11 @@ export default function ManagerPage() {
                             className={`inline-block px-1 py-0.5 rounded hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap ${TURNO_COLOR[tipo]}`}>
                             {isMD && tipo !== 'riposo' ? (
                               <div className="flex flex-col items-center leading-tight">
-                                <span className="text-xs font-bold text-gray-500">{ORE_PER_TURNO[tipo] ?? 0}h</span>
-                                <span className="text-xs font-medium">{getTurnoDisplay(tipo, isMD)}</span>
+                                <span className="text-xs font-bold text-gray-500">{getOreDisplay(tipo, shift)}h</span>
+                                <span className="text-xs font-medium">{getTurnoDisplay(tipo, isMD, shift)}</span>
                               </div>
                             ) : (
-                              <span className="text-xs font-bold">{getTurnoDisplay(tipo, isMD)}</span>
+                              <span className="text-xs font-bold">{getTurnoDisplay(tipo, isMD, shift)}</span>
                             )}
                           </button>
                         </td>
@@ -799,11 +842,10 @@ export default function ManagerPage() {
               {!isMD && <span><strong>F</strong> = Full 9-20</span>}
               {!isMD && <span><strong>—</strong> = Riposo</span>}
               {/* MD: le celle mostrano già gli orari — nessuna voce turno in legenda, solo assenze. */}
-              <span><strong className="text-yellow-700">PR</strong><span className="text-yellow-700"> = Permesso Richiesto</span></span>
-              <span><strong className="text-yellow-700">FE</strong><span className="text-yellow-700"> = Ferie</span></span>
+              <span><strong className="text-yellow-700">F</strong><span className="text-yellow-700"> = Ferie</span></span>
               <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
               <span><strong className="text-yellow-700">R</strong><span className="text-yellow-700"> = Recupero</span></span>
-              <span><strong className="text-red-700">ML</strong><span className="text-red-700"> = Malattia</span></span>
+              <span><strong className="text-red-700">M</strong><span className="text-red-700"> = Malattia</span></span>
               <span><strong className="text-yellow-700">MT</strong><span className="text-yellow-700"> = Maternità</span></span>
             </div>
           </div>
@@ -862,10 +904,57 @@ export default function ManagerPage() {
                 <ModalCalGrid giorni={giorni} selected={modalSelected} onToggle={toggleModalDate} />
 
                 <div className="mt-4">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Tipo assenza</label>
+                  <select value={modalTipoAssenza}
+                    onChange={e => { setModalTipoAssenza(e.target.value); setModalSaved(false) }}
+                    className="w-full border rounded-lg px-3 py-2 text-sm">
+                    <option value="P">P — Permesso</option>
+                    <option value="F">F — Ferie</option>
+                    <option value="R">R — Recupero</option>
+                    <option value="M">M — Malattia</option>
+                    <option value="MT">MT — Maternità</option>
+                  </select>
+                </div>
+
+                <div className="mt-4">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Motivo (opzionale)</label>
                   <input type="text" placeholder="es. visita medica, impegno familiare..."
                     className="w-full border rounded-lg px-3 py-2 text-sm"
                     value={modalMotivo} onChange={e => { setModalMotivo(e.target.value); setModalSaved(false) }} />
+                </div>
+
+                <div className="mt-5">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Storico assenze</label>
+                  {loadingStorico ? (
+                    <p className="text-xs text-gray-400">Caricamento...</p>
+                  ) : storicoAssenze.length === 0 ? (
+                    <p className="text-xs text-gray-400">Nessuna assenza registrata.</p>
+                  ) : (
+                    <div className="overflow-x-auto border rounded-lg max-h-48 overflow-y-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr className="text-left text-gray-500">
+                            <th className="px-2 py-1">Data</th>
+                            <th className="px-2 py-1">Tipo</th>
+                            <th className="px-2 py-1">Motivo</th>
+                            <th className="px-2 py-1">Inserito da</th>
+                            <th className="px-2 py-1">Data inserimento</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {storicoAssenze.map(u => (
+                            <tr key={u.id} className="border-t">
+                              <td className="px-2 py-1">{u.data}</td>
+                              <td className="px-2 py-1">{u.tipo_assenza ?? 'P'}</td>
+                              <td className="px-2 py-1">{u.motivo || '—'}</td>
+                              <td className="px-2 py-1">{u.inserito_da ?? '—'}</td>
+                              <td className="px-2 py-1">{u.created_at ? new Date(u.created_at).toLocaleDateString('it-IT') : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex gap-3 mt-5">

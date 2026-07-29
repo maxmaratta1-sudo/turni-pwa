@@ -57,6 +57,36 @@ const tools: Anthropic.Tool[] = [
       required: ['employee_name'],
     },
   },
+  {
+    name: 'save_rule',
+    description: 'Salva una nuova regola custom permanente per questo negozio (usare quando Giacomo dice "da oggi...", "sempre...", "d\'ora in poi...")',
+    input_schema: {
+      type: 'object',
+      properties: {
+        regola: { type: 'string', description: 'Testo della regola da ricordare permanentemente' },
+      },
+      required: ['regola'],
+    },
+  },
+  {
+    name: 'delete_rule',
+    description: 'Elimina/disattiva una regola custom esistente',
+    input_schema: {
+      type: 'object',
+      properties: {
+        rule_id: { type: 'string', description: 'ID della regola da eliminare' },
+      },
+      required: ['rule_id'],
+    },
+  },
+  {
+    name: 'list_rules',
+    description: 'Elenca tutte le regole custom attive per questo negozio',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
 ]
 
 interface ToolCtx {
@@ -158,6 +188,35 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     return `Turni di ${emp.nome}:\n${righe}`
   }
 
+  if (toolName === 'save_rule') {
+    const { error } = await supabaseAdmin.from('regole').insert({
+      store_id: ctx.storeId,
+      regola: input.regola,
+      attiva: true,
+      creata_da: 'Giacomo',
+    })
+    if (error) return `Errore salvataggio regola: ${error.message}`
+    return `OK: regola salvata permanentemente — "${input.regola}"`
+  }
+
+  if (toolName === 'delete_rule') {
+    const { error } = await supabaseAdmin.from('regole').update({ attiva: false }).eq('id', input.rule_id)
+    if (error) return `Errore eliminazione regola: ${error.message}`
+    return `OK: regola eliminata.`
+  }
+
+  if (toolName === 'list_rules') {
+    const { data, error } = await supabaseAdmin
+      .from('regole')
+      .select('id, regola')
+      .eq('store_id', ctx.storeId)
+      .eq('attiva', true)
+      .order('created_at')
+    if (error) return `Errore lettura regole: ${error.message}`
+    if (!data || data.length === 0) return 'Nessuna regola custom attiva al momento.'
+    return data.map(r => `[${r.id}] ${r.regola}`).join('\n')
+  }
+
   return `Errore: tool "${toolName}" non riconosciuto.`
 }
 
@@ -178,11 +237,44 @@ export async function POST(req: NextRequest) {
     ? `Oggi è ${oggi}. Il mese corrente per la pianificazione turni è ${mese}/${anno}.`
     : `Oggi è ${oggi}.`
 
+  let regoleCustomText = ''
+  if (storeId) {
+    const { data: regoleCustom } = await supabaseAdmin
+      .from('regole')
+      .select('*')
+      .eq('store_id', storeId)
+      .eq('attiva', true)
+      .order('created_at')
+    regoleCustomText = regoleCustom?.length
+      ? '\nREGOLE CUSTOM AGGIUNTE DA GIACOMO:\n' + regoleCustom.map(r => `- ${r.regola}`).join('\n')
+      : ''
+  }
+
   const system = `Sei Maia, assistente AI per la gestione turni di MD Lanciano (supermercato).
 
 ${dataContext}
 
 ${context ?? ''}
+
+VINCOLI ORARI NEGOZIO:
+- Apertura: 08:00 — Chiusura: 20:00
+- Nessun turno può iniziare prima delle 08:00 o finire dopo le 20:00
+- Turni pomeridiani: fine sempre 20:00, inizio = 20:00 - ore del turno
+  Es: 4h pomeriggio → 16/20 | 5h → 15/20 | 6h → 14/20
+- Mai iniziare un turno pomeridiano oltre le 17:00
+
+ORE GIORNALIERE PER CONTRATTO:
+- 22h: min 3h/giorno, max 5h/giorno — sabato sempre 5h (8/13)
+- 28h: min 4h/giorno, max 6h/giorno — sabato sempre 6h
+- 35h: min 5h/giorno, max 6h/giorno — sabato sempre 6h
+- 30h (Max): sempre 5h fisso — mattina 8/13, pomeriggio 14/19 — alterna con Romeo
+- 36h: sempre 6h/giorno — sabato 6h
+
+CASSIERE 22h — ORARIO INIZIO MATTINA FLESSIBILE:
+- Possono iniziare alle 08:00, 09:00 o 10:00
+- Fine = inizio + ore assegnate
+- La scelta dipende dalla copertura necessaria
+${regoleCustomText}
 
 REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
 1. Gilda e Tony: sempre mattina 08-14, mai domenica
@@ -209,6 +301,9 @@ REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente
 
 COMPORTAMENTO:
 - Rispondi sempre in italiano, sii concisa e pratica
+- Se Giacomo dice frasi tipo "da oggi...", "sempre...", "d'ora in poi..." per introdurre una nuova regola permanente, usa il tool save_rule per salvarla
+- Se Giacomo chiede di rimuovere/disattivare una regola custom, usa list_rules per trovarla e poi delete_rule
+- Se ti chiede quali regole custom sono attive, usa list_rules
 - Puoi modificare i turni usando i tool a disposizione — se ti chiedono una modifica, USA il tool invece di limitarti a descriverla, altrimenti non viene salvata davvero
 - Se una modifica richiesta viola una regola assoluta, AVVISA e chiedi conferma esplicita a Giacomo prima di procedere
 - Se Giacomo conferma esplicitamente di voler procedere comunque, esegui la modifica anche in deroga alle regole`

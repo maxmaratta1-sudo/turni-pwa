@@ -41,6 +41,9 @@ export interface Unavailability {
   schedule_id: string
   data: string
   motivo?: string
+  tipo_assenza?: string   // 'P' | 'F' | 'R' | 'M' | 'MT' — default 'P'
+  inserito_da?: string    // chi ha registrato l'assenza (default 'manager')
+  created_at?: string
 }
 
 export interface Shift {
