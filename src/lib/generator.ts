@@ -170,6 +170,19 @@ function orarioPomeriggio(ore: number): { inizio: string; fine: string } {
   return { inizio: formatOra(20 - ore), fine: '20:00' }
 }
 
+// Alternanza sabati (settimane pari/dispari) — Carlo e il "gruppo 2" alternano
+// mattina/pomeriggio del sabato invece di avere una direzione fissa. Yuri resta
+// SEMPRE mattina 08-14 di sabato (regola propria, non tocca questa alternanza).
+const ALTERNANZA_SABATO_GRUPPO2 = ['Angelica', 'Damiana', 'Elisa', 'Marilena', 'Cristina', 'Stefania']
+
+/** Direzione sabato per il "gruppo 2": metà del gruppo mattina, metà pomeriggio,
+ * si invertono a settimane alterne (weekIsEven). */
+function direzioneSabatoGruppo2(nome: string, weekIsEven: boolean): boolean {
+  const idx = ALTERNANZA_SABATO_GRUPPO2.indexOf(nome)
+  const isFirstHalf = idx >= 0 && idx < Math.ceil(ALTERNANZA_SABATO_GRUPPO2.length / 2)
+  return weekIsEven ? isFirstHalf : !isFirstHalf
+}
+
 function formatOra(h: number): string {
   return `${String(Math.floor(h)).padStart(2, '0')}:00`
 }
@@ -289,8 +302,9 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
       // R2 — Carlo (35h): Mar/Gio obbligatoriamente mattina, altri giorni preferenza mattina.
       else if (emp.nome === 'Carlo') {
         if (dayOfWeek === 6) {
-          tipo = 'mattina'
-          orario = orarioMattina(6) // sabato fisso 6h
+          // Sabato: alterna mattina/pomeriggio a settimane alterne (indipendente da Yuri).
+          tipo = weekIsEven ? 'mattina' : 'pomeriggio'
+          orario = weekIsEven ? orarioMattina(6) : orarioPomeriggio(6)
         } else {
           const ore = getPianoGiorno(emp, settimana, weekdayIdx)
           if (ore <= 0) { tipo = 'riposo'; orario = null }
@@ -303,9 +317,10 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
         const idx = cassieri22.findIndex(e => e.id === emp.id)
         const mattinaOra = (giorno.getDate() + idx) % 4 < 2
         if (dayOfWeek === 6) {
-          // Sabato: sempre 5h, sempre mattina 08:00-13:00 (regola fissa)
-          tipo = 'mattina'
-          orario = { inizio: '08:00', fine: '13:00' }
+          // Sabato: sempre 5h, direzione alternata a settimane alterne (gruppo 2).
+          const mattinaSabato = direzioneSabatoGruppo2(emp.nome, weekIsEven)
+          tipo = mattinaSabato ? 'mattina' : 'pomeriggio'
+          orario = mattinaSabato ? { inizio: '08:00', fine: '13:00' } : orarioPomeriggio(5)
         } else {
           const ore = getPianoGiorno(emp, settimana, weekdayIdx)
           if (ore <= 0) { tipo = 'riposo'; orario = null }
@@ -320,8 +335,10 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
         const mattinaGiorni = [1, 3, 5]
         const mattinaOra = mattinaGiorni.includes(dayOfWeek)
         if (dayOfWeek === 6) {
-          tipo = 'pomeriggio'
-          orario = orarioPomeriggio(6) // sabato fisso 6h
+          // Sabato: sempre 6h, direzione alternata a settimane alterne (gruppo 2).
+          const mattinaSabato = direzioneSabatoGruppo2(emp.nome, weekIsEven)
+          tipo = mattinaSabato ? 'mattina' : 'pomeriggio'
+          orario = mattinaSabato ? orarioMattina(6) : orarioPomeriggio(6)
         } else {
           const ore = getPianoGiorno(emp, settimana, weekdayIdx)
           if (ore <= 0) { tipo = 'riposo'; orario = null }

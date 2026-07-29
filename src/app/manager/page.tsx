@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, Fragment } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME, ORARI_TURNO, ORARI_TURNO_MD } from '@/types'
+import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME, ORARI_TURNO, ORARI_TURNO_MD, FerieSaldo } from '@/types'
 import MaiaChatBubble from '@/components/MaiaChatBubble'
 import { oreFromOrario } from '@/lib/generator'
 
@@ -169,6 +169,7 @@ export default function ManagerPage() {
   const [modalTipoAssenza, setModalTipoAssenza] = useState('P')
   const [storicoAssenze, setStoricoAssenze] = useState<Unavailability[]>([])
   const [loadingStorico, setLoadingStorico] = useState(false)
+  const [ferieSaldi, setFerieSaldi] = useState<Record<string, FerieSaldo>>({})
 
   const giorni = getDays(anno, mese)
   // Tabella: parte sempre da Lunedì — i giorni "orfani" prima del primo Lunedì del mese
@@ -230,6 +231,14 @@ export default function ManagerPage() {
         .select('*').eq('store_id', storeId!).eq('attivo', true).order('nome')
       if (empErr) { setError(`employees: ${empErr.message}`); setLoading(false); return }
       setEmployees(sortEmployees(emps || [], isMD))
+
+      if (isMD && emps && emps.length > 0) {
+        const { data: saldi } = await supabase.from('ferie_saldo')
+          .select('*').in('employee_id', emps.map(e => e.id)).eq('anno', anno)
+        const map: Record<string, FerieSaldo> = {}
+        for (const s of saldi || []) map[s.employee_id] = s
+        setFerieSaldi(map)
+      }
 
       const { data: sched, error: schedErr } = await supabase.from('schedules')
         .select('*').eq('store_id', storeId!).eq('mese', mese).eq('anno', anno).maybeSingle()
@@ -487,6 +496,18 @@ export default function ManagerPage() {
       .reduce((sum, g) => sum + oreLavorateGiorno(empId, g.data), 0)
   }
 
+  /** True se il dipendente ha usato Ferie (F) in uno dei 7 giorni che finiscono con `sundayData`. */
+  function haUsatoFerieSettimana(empId: string, sundayData: string): boolean {
+    const sunday = new Date(sundayData + 'T00:00:00')
+    const start = new Date(sunday)
+    start.setDate(start.getDate() - 6)
+    return unavailabilities.some(u => {
+      if (u.employee_id !== empId || u.tipo_assenza !== 'F') return false
+      const d = new Date(u.data + 'T00:00:00')
+      return d >= start && d <= sunday
+    })
+  }
+
   function totColor(tot: number, target: number): string {
     if (shifts.length === 0) return 'bg-gray-100 text-gray-400' // settimana non ancora generata
     const diff = Math.abs(tot - target)
@@ -504,18 +525,51 @@ export default function ManagerPage() {
   async function salvaIndisponibilitaModal() {
     if (!dettaglioEmp || !schedule) return
     setModalSaving(true)
+
+    // Saldo ferie/permessi: calcola il delta rispetto allo stato PRIMA di salvare
+    // (le date fuori da modalSelected vengono cancellate dall'API, quindi vanno
+    // "restituite" al saldo se erano F/P; le nuove F/P vengono scalate).
+    const prevRecords = unavailabilities.filter(u => u.employee_id === dettaglioEmp.id)
+    const nuoveDate = Array.from(modalSelected)
+
+    const oldFDate = new Set(prevRecords.filter(u => u.tipo_assenza === 'F').map(u => u.data))
+    const newFDate = new Set(modalTipoAssenza === 'F' ? nuoveDate : [])
+    const deltaFerieGiorni = newFDate.size - oldFDate.size
+
+    const oldPDate = prevRecords.filter(u => u.tipo_assenza === 'P').map(u => u.data)
+    const newPDate = modalTipoAssenza === 'P' ? nuoveDate : []
+    const addedP = newPDate.filter(d => !oldPDate.includes(d))
+    const removedP = oldPDate.filter(d => !newPDate.includes(d))
+    const deltaPermessiOre =
+      addedP.reduce((sum, d) => sum + oreFromOrario(getShift(dettaglioEmp.id, d)?.ora_inizio, getShift(dettaglioEmp.id, d)?.ora_fine), 0) -
+      removedP.reduce((sum, d) => sum + oreFromOrario(getShift(dettaglioEmp.id, d)?.ora_inizio, getShift(dettaglioEmp.id, d)?.ora_fine), 0)
+
     const res = await fetch('/api/unavailabilities', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         token: dettaglioEmp.token,
         schedule_id: schedule.id,
-        dates: Array.from(modalSelected),
+        dates: nuoveDate,
         motivo: modalMotivo,
         tipo_assenza: modalTipoAssenza,
         inserito_da: 'manager',
       }),
     })
+
+    if (res.ok && isMD && (deltaFerieGiorni !== 0 || deltaPermessiOre !== 0)) {
+      await fetch('/api/ferie-saldo', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          employee_id: dettaglioEmp.id,
+          anno,
+          delta_ferie_giorni: deltaFerieGiorni,
+          delta_permessi_ore: deltaPermessiOre,
+        }),
+      })
+    }
+
     setModalSaving(false)
     if (res.ok) {
       setModalSaved(true)
@@ -834,13 +888,19 @@ export default function ManagerPage() {
 
                       const showTot = isMD && g.domenica
                       const tot = showTot ? totSettimana(emp.id, g.data) : 0
+                      const haUsatoFerie = showTot && haUsatoFerieSettimana(emp.id, g.data)
+                      const saldoEmp = ferieSaldi[emp.id]
+                      const ferieRimanenti = saldoEmp ? (saldoEmp.ferie_giorni_totali - saldoEmp.ferie_giorni_usati) : null
 
                       return (
                         <Fragment key={g.data}>
                           {dayCell}
                           {showTot && (
                             <td className={`p-1 text-center text-xs font-bold ${totColor(tot, emp.ore_settimanali)}`}>
-                              {tot}h
+                              <div>{tot}h</div>
+                              {haUsatoFerie && ferieRimanenti !== null && (
+                                <div className="text-[10px] font-normal text-gray-500">F:{ferieRimanenti.toFixed(0)}g</div>
+                              )}
                             </td>
                           )}
                         </Fragment>
@@ -904,6 +964,22 @@ export default function ManagerPage() {
               <h2 className="font-bold text-gray-800 text-lg">🗓 Indisponibilità — {dettaglioEmp.nome}</h2>
               <button onClick={() => setDettaglioEmp(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
             </div>
+
+            {isMD && ferieSaldi[dettaglioEmp.id] && (() => {
+              const s = ferieSaldi[dettaglioEmp.id]
+              return (
+                <div className="flex gap-4 mb-4 p-3 bg-gray-50 rounded-lg">
+                  <div>
+                    <div className="text-xs text-gray-500">Ferie disponibili</div>
+                    <div className="font-bold text-green-600">{(s.ferie_giorni_totali - s.ferie_giorni_usati).toFixed(2)} giorni</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-500">Permessi disponibili</div>
+                    <div className="font-bold text-blue-600">{(s.permessi_ore_totali - s.permessi_ore_usate).toFixed(2)} ore</div>
+                  </div>
+                </div>
+              )
+            })()}
 
             {!schedule ? (
               <p className="text-gray-500 text-sm">Crea prima il piano del mese per poter registrare le indisponibilità.</p>

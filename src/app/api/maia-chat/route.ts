@@ -250,6 +250,23 @@ export async function POST(req: NextRequest) {
       : ''
   }
 
+  let saldiText = ''
+  if (storeId) {
+    const annoCorrente = anno ?? new Date().getFullYear()
+    const { data: employeesStore } = await supabaseAdmin.from('employees').select('id, nome').eq('store_id', storeId)
+    const { data: saldi } = await supabaseAdmin
+      .from('ferie_saldo')
+      .select('*')
+      .eq('anno', annoCorrente)
+      .in('employee_id', (employeesStore || []).map(e => e.id))
+    saldiText = saldi?.length
+      ? '\nSALDI FERIE E PERMESSI AGGIORNATI:\n' + saldi.map(s => {
+          const nome = employeesStore?.find(e => e.id === s.employee_id)?.nome ?? s.employee_id
+          return `- ${nome}: Ferie ${(s.ferie_giorni_totali - s.ferie_giorni_usati).toFixed(2)}gg rimanenti, Permessi ${(s.permessi_ore_totali - s.permessi_ore_usate).toFixed(2)}h rimanenti`
+        }).join('\n')
+      : ''
+  }
+
   const system = `Sei Maia, assistente AI per la gestione turni di MD Lanciano (supermercato).
 
 ${dataContext}
@@ -275,6 +292,11 @@ CASSIERE 22h — ORARIO INIZIO MATTINA FLESSIBILE:
 - Fine = inizio + ore assegnate
 - La scelta dipende dalla copertura necessaria
 ${regoleCustomText}
+${saldiText}
+
+Quando Giacomo assegna Ferie (F) → scala 1 giorno dal saldo ferie del dipendente
+Quando Giacomo assegna Permesso (P) → scala le ore del turno dal saldo permessi
+Avvisare Giacomo se un dipendente ha saldo insufficiente prima di procedere
 
 REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
 1. Gilda e Tony: sempre mattina 08-14, mai domenica

@@ -35,6 +35,17 @@ export interface Schedule {
   stato: 'bozza' | 'pubblicato'
 }
 
+export interface FerieSaldo {
+  id: string
+  employee_id: string
+  ferie_giorni_totali: number
+  ferie_giorni_usati: number
+  permessi_ore_totali: number
+  permessi_ore_usate: number
+  anno: number
+  created_at?: string
+}
+
 export interface Unavailability {
   id: string
   employee_id: string
