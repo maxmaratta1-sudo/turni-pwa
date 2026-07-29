@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, Fragment } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME } from '@/types'
@@ -7,6 +7,25 @@ import MaiaChatBubble from '@/components/MaiaChatBubble'
 
 const MESI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
                'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre']
+
+// Ordine fisso dipendenti per MD Lanciano (non alfabetico) — Stroili resta alfabetico.
+const ORDINE_MD = [
+  'Angelica', 'Damiana', 'Elisa', 'Marilena',
+  'Max', 'Romeo', 'Stefania', 'Cristina',
+  'Yuri', 'Tony', 'Gilda',
+]
+
+function sortEmployees(emps: Employee[], isMD: boolean): Employee[] {
+  if (!isMD) return [...emps].sort((a, b) => a.nome.localeCompare(b.nome))
+  return [...emps].sort((a, b) => {
+    const ia = ORDINE_MD.indexOf(a.nome)
+    const ib = ORDINE_MD.indexOf(b.nome)
+    if (ia === -1 && ib === -1) return a.nome.localeCompare(b.nome)
+    if (ia === -1) return 1  // dipendenti non in lista vanno in fondo
+    if (ib === -1) return -1
+    return ia - ib
+  })
+}
 const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
   mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina',
   domenica_lungo: 'domenica_lungo', domenica_corto: 'domenica_corto',
@@ -29,6 +48,15 @@ const TURNO_COLOR: Record<string, string> = {
   mattina_corta: 'bg-cyan-100 text-cyan-800',
   pomeriggio_corto: 'bg-orange-50 text-orange-600',
 }
+// Ore lavorate per tipo turno — usato per la colonna TOT settimanale (solo MD).
+const ORE_PER_TURNO: Record<string, number> = {
+  mattina: 6, pomeriggio: 6, full: 9,
+  mattina_corta: 5, pomeriggio_corto: 5,
+  yuri_full: 6, yuri_pomeriggio: 3,
+  domenica_lungo: 5, domenica_corto: 3,
+  riposo: 0,
+}
+
 const ASSENZA_LABEL: Record<string, string> = {
   PR: 'Permesso Richiesto', FE: 'Ferie', P: 'Permesso', R: 'Recupero', ML: 'Malattia', MT: 'Maternità',
 }
@@ -149,7 +177,7 @@ export default function ManagerPage() {
       const { data: emps, error: empErr } = await supabase.from('employees')
         .select('*').eq('store_id', storeId!).eq('attivo', true).order('nome')
       if (empErr) { setError(`employees: ${empErr.message}`); setLoading(false); return }
-      setEmployees(emps || [])
+      setEmployees(sortEmployees(emps || [], isMD))
 
       const { data: sched, error: schedErr } = await supabase.from('schedules')
         .select('*').eq('store_id', storeId!).eq('mese', mese).eq('anno', anno).maybeSingle()
@@ -229,7 +257,7 @@ export default function ManagerPage() {
   async function ripristinaEmployee(emp: Employee) {
     await supabase.from('employees').update({ attivo: true }).eq('id', emp.id)
     setCestino(prev => prev.filter(e => e.id !== emp.id))
-    setEmployees(prev => [...prev, emp].sort((a, b) => a.nome.localeCompare(b.nome)))
+    setEmployees(prev => sortEmployees([...prev, emp], isMD))
   }
 
   async function svuotaCestino() {
@@ -267,15 +295,28 @@ export default function ManagerPage() {
     doc.setFontSize(14)
     doc.text(`Turni ${nomeMese} ${anno}${subtitle ? ` — ${subtitle}` : ''} — ${storeNome || 'Negozio'}`, 14, 14)
 
-    const head = [['Dipendente', ...giorniDaEsportare.map(g => `${g.num}\n${g.giorno}`)]]
-    const body = employees.map(emp => [
-      emp.nome,
-      ...giorniDaEsportare.map(g => {
-        if (hasUnavailability(emp.id, g.data)) return getAssenzaCode(emp.id, g.data)
-        const shift = getShift(emp.id, g.data)
-        return getTurnoDisplay(shift?.tipo || 'riposo', isMD)
+    const headRow: string[] = ['Dipendente']
+    giorniDaEsportare.forEach(g => {
+      headRow.push(`${g.num}\n${g.giorno}`)
+      if (isMD && GIORNI_FINE_SETTIMANA_TOT.includes(g.num)) headRow.push('TOT')
+    })
+    const head = [headRow]
+
+    const body = employees.map(emp => {
+      const row: string[] = [emp.nome]
+      giorniDaEsportare.forEach(g => {
+        if (hasUnavailability(emp.id, g.data)) {
+          row.push(getAssenzaCode(emp.id, g.data))
+        } else {
+          const shift = getShift(emp.id, g.data)
+          row.push(getTurnoDisplay(shift?.tipo || 'riposo', isMD))
+        }
+        if (isMD && GIORNI_FINE_SETTIMANA_TOT.includes(g.num)) {
+          row.push(`${totSettimana(emp.id, g.num)}h`)
+        }
       })
-    ])
+      return row
+    })
 
     autoTable(doc, {
       head,
@@ -290,6 +331,18 @@ export default function ManagerPage() {
           // Assenze — sempre lettera, indipendentemente da MD/Stroili
           if (['PR', 'FE', 'P', 'R', 'MT'].includes(val)) { data.cell.styles.fillColor = [254, 243, 199]; return }
           if (val === 'ML') { data.cell.styles.fillColor = [254, 226, 226]; return }
+
+          // Colonna TOT (es. "22h") — verde/rosso in base allo scarto dal contratto settimanale
+          const totMatch = isMD ? val.match(/^(\d+)h$/) : null
+          if (totMatch) {
+            const tot = parseInt(totMatch[1], 10)
+            const emp = employees[data.row.index]
+            if (emp) {
+              const diff = Math.abs(tot - emp.ore_settimanali)
+              data.cell.styles.fillColor = diff <= 1 ? [220, 252, 231] : [254, 226, 226]
+            }
+            return
+          }
 
           // Turni — MD mostra orari, Stroili mostra lettere: due mappe di colore separate
           const colorMD: Record<string, [number, number, number]> = {
@@ -355,6 +408,28 @@ export default function ManagerPage() {
     const nuovoMotivo = next === 'PR' ? restoMotivo : `[${next}] ${restoMotivo}`.trim()
     await supabase.from('unavailabilities').update({ motivo: nuovoMotivo || null }).eq('id', u.id)
     setUnavailabilities(prev => prev.map(x => x.id === u.id ? { ...x, motivo: nuovoMotivo || null } : x))
+  }
+
+  // ── Colonna TOT settimanale (solo MD) ────────────────────────────────────
+  const GIORNI_FINE_SETTIMANA_TOT = [7, 14, 21, 28]
+
+  function oreLavorateGiorno(empId: string, data: string): number {
+    if (hasUnavailability(empId, data)) return 0 // assenza = 0h lavorate
+    const shift = getShift(empId, data)
+    return ORE_PER_TURNO[shift?.tipo ?? 'riposo'] ?? 0
+  }
+
+  function totSettimana(empId: string, finoAlGiorno: number): number {
+    const inizio = finoAlGiorno - 6
+    return giorni
+      .filter(g => g.num >= inizio && g.num <= finoAlGiorno)
+      .reduce((sum, g) => sum + oreLavorateGiorno(empId, g.data), 0)
+  }
+
+  function totColor(tot: number, target: number): string {
+    if (shifts.length === 0) return 'bg-gray-100 text-gray-400' // settimana non ancora generata
+    const diff = Math.abs(tot - target)
+    return diff <= 1 ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
   }
 
   function toggleModalDate(data: string) {
@@ -610,10 +685,15 @@ export default function ManagerPage() {
                 <tr className="border-b">
                   <th className="text-left p-3 font-semibold text-gray-700 sticky left-0 bg-white min-w-32">Dipendente</th>
                   {giorni.map(g => (
-                    <th key={g.data} className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'}`}>
-                      <div className="text-xs">{g.giorno}</div>
-                      <div className="text-xs text-gray-400">{g.num}</div>
-                    </th>
+                    <Fragment key={g.data}>
+                      <th className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'}`}>
+                        <div className="text-xs">{g.giorno}</div>
+                        <div className="text-xs text-gray-400">{g.num}</div>
+                      </th>
+                      {isMD && GIORNI_FINE_SETTIMANA_TOT.includes(g.num) && (
+                        <th className="p-2 text-center font-semibold text-gray-700 bg-gray-50 min-w-16">TOT</th>
+                      )}
+                    </Fragment>
                   ))}
                 </tr>
               </thead>
@@ -637,10 +717,10 @@ export default function ManagerPage() {
                       const domenicaBloccata = g.domenica && !isMD
                       const cellBg = g.domenica ? (isMD ? 'bg-purple-50' : 'bg-red-50') : ''
 
-                      if (isPermesso && tipo === 'riposo') {
+                      const dayCell = (isPermesso && tipo === 'riposo') ? (() => {
                         const assenzaCode = getAssenzaCode(emp.id, g.data)
                         return (
-                          <td key={g.data} className={`p-1 text-center ${cellBg}`}>
+                          <td className={`p-1 text-center ${cellBg}`}>
                             <button
                               onClick={() => !domenicaBloccata && cycleAssenza(emp.id, g.data)}
                               disabled={domenicaBloccata}
@@ -650,10 +730,8 @@ export default function ManagerPage() {
                             </button>
                           </td>
                         )
-                      }
-
-                      return (
-                        <td key={g.data} className={`p-1 text-center ${cellBg}`}>
+                      })() : (
+                        <td className={`p-1 text-center ${cellBg}`}>
                           <button
                             onClick={() => !domenicaBloccata && cycleShift(emp.id, g.data)}
                             disabled={domenicaBloccata}
@@ -663,24 +741,32 @@ export default function ManagerPage() {
                           </button>
                         </td>
                       )
+
+                      const showTot = isMD && GIORNI_FINE_SETTIMANA_TOT.includes(g.num)
+                      const tot = showTot ? totSettimana(emp.id, g.num) : 0
+
+                      return (
+                        <Fragment key={g.data}>
+                          {dayCell}
+                          {showTot && (
+                            <td className={`p-1 text-center text-xs font-bold ${totColor(tot, emp.ore_settimanali)}`}>
+                              {tot}h
+                            </td>
+                          )}
+                        </Fragment>
+                      )
                     })}
                   </tr>
                 ))}
               </tbody>
             </table>
             <div className="p-3 text-xs text-gray-400 flex gap-4 flex-wrap">
+              {/* Stroili: le celle mostrano ancora lettere (M/Pm/F), la legenda resta utile. */}
               {!isMD && <span><strong>M</strong> = Mattina 9-14</span>}
               {!isMD && <span><strong>Pm</strong> = Pomeriggio 14-20</span>}
               {!isMD && <span><strong>F</strong> = Full 9-20</span>}
-              {isMD && <span><strong>8/14</strong> = Mattina</span>}
-              {isMD && <span><strong>14/20</strong> = Pomeriggio</span>}
-              {isMD && <span><strong>8/20</strong> = Full</span>}
-              {isMD && <span><strong>8/13</strong> = Mattina corta (Max) / Domenica lungo</span>}
-              {isMD && <span><strong>14/19</strong> = Pomeriggio corto (Max)</span>}
-              {isMD && <span><strong>8/16</strong> = Yuri (sala, Lun/Mer/Ven)</span>}
-              {isMD && <span><strong>13/16</strong> = Yuri (sala, Mar/Gio — mattina in salumeria)</span>}
-              {isMD && <span><strong>10/13</strong> = Domenica corto</span>}
-              <span><strong>—</strong> = Riposo</span>
+              {!isMD && <span><strong>—</strong> = Riposo</span>}
+              {/* MD: le celle mostrano già gli orari — nessuna voce turno in legenda, solo assenze. */}
               <span><strong className="text-yellow-700">PR</strong><span className="text-yellow-700"> = Permesso Richiesto</span></span>
               <span><strong className="text-yellow-700">FE</strong><span className="text-yellow-700"> = Ferie</span></span>
               <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>

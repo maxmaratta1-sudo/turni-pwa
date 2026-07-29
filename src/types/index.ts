@@ -82,7 +82,7 @@ export const ORE_TURNO_MD: Record<TurnoTipo, number> = {
   riposo: 0,
   domenica_lungo: 5,   // 08:00-13:00
   domenica_corto: 3,   // 10:00-13:00
-  yuri_full: 8,        // 08:00-16:00 (Lun/Mer/Ven)
+  yuri_full: 6,        // 08:00-16:00 (Lun/Mer/Ven) — 8h nominali, 6h effettive con pausa
   yuri_pomeriggio: 3,  // 13:00-16:00 (Mar/Gio, mattina in salumeria)
   mattina_corta: 5,    // 08:00-13:00 (Max)
   pomeriggio_corto: 5, // 14:00-19:00 (Max)
