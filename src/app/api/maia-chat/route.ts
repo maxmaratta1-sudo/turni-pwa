@@ -26,6 +26,10 @@ const tools: Anthropic.Tool[] = [
           enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto'],
           description: 'Tipo di turno. yuri_full=08-16 (Lun/Mer/Ven Yuri), yuri_pomeriggio=13-16 (Mar/Gio Yuri), mattina_corta=08-13 e pomeriggio_corto=14-19 (Max, 5h)',
         },
+        recupero_domenicale: {
+          type: 'boolean',
+          description: 'true SOLO quando tipo="riposo" e stai applicando il riposo compensativo per un turno domenicale già confermato da Giacomo — registra anche una R (Recupero) in unavailabilities, non solo lo shift a riposo.',
+        },
       },
       required: ['employee_name', 'data', 'tipo'],
     },
@@ -228,17 +232,13 @@ async function trovaBilanciamentoDomenica(
   const candidati = (weekShifts || [])
     .filter(s => s.tipo !== 'riposo')
     .filter(s => {
-      if (!isRomeo) return true
       const dow = new Date(s.data + 'T00:00:00').getDay()
-      return dow !== 1 && dow !== 3 && dow !== 5 // Romeo: mai Lun/Mer/Ven (scarico merce)
+      if (dow === 6) return false // MAI sabato — è sempre un giorno lavorativo, non recupero
+      if (dow === 0) return false // MAI domenica
+      if (isRomeo && (dow === 1 || dow === 3 || dow === 5)) return false // Romeo: mai Lun/Mer/Ven (scarico merce)
+      return true
     })
-    .sort((a, b) => {
-      const aSab = new Date(a.data + 'T00:00:00').getDay() === 6
-      const bSab = new Date(b.data + 'T00:00:00').getDay() === 6
-      if (aSab && !bSab) return -1
-      if (!aSab && bSab) return 1
-      return getOreReali(b) - getOreReali(a)
-    })
+    .sort((a, b) => getOreReali(b) - getOreReali(a))
 
   for (const s of candidati) {
     const oreGiorno = getOreReali(s)
@@ -308,7 +308,21 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
         const proposta = await trovaBilanciamentoDomenica(ctx.scheduleId, emp, input.data, oreDomenica)
         return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). ${proposta}`
       }
-      return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). IMPORTANTE: ora DEVI chiedere a Giacomo in quale giorno della settimana PRECEDENTE vuole che ${emp.nome} recuperi le ${oreDomenica} ore lavorate domenica — non concludere il flusso senza aver fatto questa domanda.`
+      return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). IMPORTANTE: ora DEVI chiedere a Giacomo in quale giorno della settimana PRECEDENTE (MAI sabato, MAI domenica${emp.nome === 'Romeo' ? ', MAI Lun/Mer/Ven per Romeo' : ''}) vuole che ${emp.nome} recuperi le ${oreDomenica} ore lavorate domenica — non concludere il flusso senza aver fatto questa domanda.`
+    }
+    if (input.tipo === 'riposo' && input.recupero_domenicale) {
+      await supabaseAdmin.from('unavailabilities').delete()
+        .eq('employee_id', emp.id).eq('schedule_id', ctx.scheduleId).eq('data', input.data)
+      const { error: errRecupero } = await supabaseAdmin.from('unavailabilities').insert({
+        employee_id: emp.id,
+        schedule_id: ctx.scheduleId,
+        data: input.data,
+        tipo_assenza: 'R',
+        motivo: 'Recupero domenicale',
+        inserito_da: 'maia',
+      })
+      if (errRecupero) return `Turno impostato a riposo, ma errore salvataggio recupero: ${errRecupero.message}`
+      return `OK: ${emp.nome} riposa il ${input.data} per compensare le ore domenicali (registrato come R — Recupero).`
     }
     return `OK: turno di ${emp.nome} il ${input.data} impostato su "${input.tipo}".`
   }
@@ -556,10 +570,16 @@ REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente
 FLUSSO DOMENICA OBBLIGATORIO:
 Quando Giacomo assegna un turno domenicale (domenica_lungo o domenica_corto) tramite update_shift/update_shift_week:
 1. Il tool calcola già le ore (domenica_lungo=5h, domenica_corto=3h) e ti segnala che DEVI chiedere il recupero.
-2. Rispondi SEMPRE con: "✅ Turno domenicale assegnato a [nome]. In quale giorno della settimana precedente ([date Lun-Sab]) vuole che [nome] recuperi le [X] ore lavorate domenica?"
-3. Quando Giacomo indica il giorno → usa update_shift con tipo "riposo" su quella data.
+2. Rispondi SEMPRE con: "✅ Turno domenicale assegnato a [nome]. In quale giorno della settimana precedente ([date Lun-Ven] — MAI sabato) vuole che [nome] recuperi le [X] ore lavorate domenica?"
+3. Quando Giacomo indica il giorno → usa update_shift con tipo "riposo" E recupero_domenicale:true su quella data (registra automaticamente una R — Recupero, non solo lo shift a riposo).
 4. Conferma: "✅ [Nome] riposa [giorno] per compensare le ore domenicali."
 NON considerare completo il flusso domenicale finché non hai gestito il riposo compensativo — se Giacomo cambia argomento senza rispondere, puoi lasciar perdere, ma la domanda va sempre fatta subito dopo l'assegnazione.
+
+RIPOSO COMPENSATIVO DOMENICA — REGOLA ASSOLUTA SUL GIORNO:
+Il riposo compensativo domenicale NON può mai essere assegnato al SABATO.
+Il sabato è sempre un giorno lavorativo — non può essere usato come recupero.
+Proporre sempre e solo giorni feriali (Lun/Mar/Mer/Gio/Ven) come riposo compensativo.
+Per Romeo: escludere anche Lun/Mer/Ven (scarico merce) → solo Mar o Gio.
 
 ⚠️ REGOLA CRITICA SULLE ORE (si applica SOLO ai turni lavorativi feriali — mattina/pomeriggio/full — MAI a domenica_lungo/domenica_corto, vedi regola assoluta sotto):
 Le ore settimanali di ogni dipendente DEVONO corrispondere ESATTAMENTE alle ore del contratto.
@@ -596,7 +616,8 @@ già in automatico se serve un aggiustamento e ti restituisce una proposta pront
    ESATTAMENTE quella proposta a Giacomo (giorno e ore già calcolati automaticamente).
    Romeo: il giorno proposto non è MAI Lun/Mer/Ven (scarico merce) — non serve verificarlo tu.
 3. Solo dopo che Giacomo conferma esplicitamente ("sì"/"confermo") → usa update_shift con
-   tipo "riposo" (o le ore ridotte proposte) su quella data per applicare la modifica.
+   tipo "riposo" E recupero_domenicale:true (o le ore ridotte proposte, senza il flag se
+   non è un riposo completo) su quella data per applicare la modifica.
 4. Conferma: "✅ [Nome] riposa/riduce [giorno] per compensare le ore domenicali."
 NON chiedere a Giacomo di scegliere tu il giorno per i 28h — il giorno è già trovato
 automaticamente dal tool. Per tutti gli altri contratti (22h/35h/36h) resta invece il
