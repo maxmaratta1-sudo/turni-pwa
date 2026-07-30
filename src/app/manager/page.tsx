@@ -173,6 +173,7 @@ export default function ManagerPage() {
   const [popupCell, setPopupCell] = useState<{ empId: string; data: string; x: number; y: number } | null>(null)
   const [showChiusure, setShowChiusure] = useState(false)
   const [settimanaChiusure, setSettimanaChiusure] = useState(0)
+  const [settimanaSelezionata, setSettimanaSelezionata] = useState<number | ''>('')
 
   const giorni = getDays(anno, mese)
   // Regola assoluta: i giorni del mese vanno sempre in ordine cronologico 1→31,
@@ -181,6 +182,8 @@ export default function ManagerPage() {
   const giorniOrdinati = giorni
   const offsetLunedi = getOffsetLunedi(anno, mese)
   const isMD = storeNome === MD_LANCIANO_STORE_NOME
+  const settimaneMese = getSettimaneLunDom(giorni, mese)
+  const settimanaAttiva = settimanaSelezionata !== '' ? settimaneMese[settimanaSelezionata] : null
 
   useEffect(() => {
     const id = localStorage.getItem('turni_store_id')
@@ -319,6 +322,51 @@ Segnala solo le violazioni trovate.
 Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
 `
     window.dispatchEvent(new CustomEvent('maiaAutoMessage', { detail: { message: messaggioControllo } }))
+  }
+
+  function lavoraSuSettimana() {
+    if (!settimanaAttiva) return
+    const giorniFeriali = settimanaAttiva.giorni.filter(g => !g.domenica)
+    const domeniche = settimanaAttiva.giorni.filter(g => g.domenica)
+
+    const situazione = employees.map(emp => {
+      const turniSett = giorniFeriali
+        .map(g => ({ g, shift: getShift(emp.id, g.data) }))
+        .filter(({ shift }) => shift && shift.tipo !== 'riposo')
+      const oreTot = giorniFeriali.reduce((sum, g) => sum + oreLavorateGiorno(emp.id, g.data), 0)
+      const dettaglio = turniSett
+        .map(({ g, shift }) => `${g.giorno} ${g.num}: ${getTurnoDisplay(shift!.tipo, isMD, shift!)}`)
+        .join(', ')
+      return `- ${emp.nome} (${emp.ore_settimanali}h contratto): ${oreTot}h assegnate${dettaglio ? ' — ' + dettaglio : ''}`
+    }).join('\n')
+
+    const domenicheTesto = domeniche.map(g => {
+      const lavoranti = employees
+        .map(emp => ({ emp, shift: getShift(emp.id, g.data) }))
+        .filter(({ shift }) => shift && shift.tipo !== 'riposo')
+      const elenco = lavoranti.map(({ emp, shift }) => `${emp.nome} (${getTurnoDisplay(shift!.tipo, isMD, shift!)})`).join(', ')
+      return `- ${g.num} ${MESI[mese - 1]}: ${elenco || 'nessuno assegnato'}`
+    }).join('\n')
+
+    const primo = settimanaAttiva.giorni[0]
+    const ultimo = settimanaAttiva.giorni[settimanaAttiva.giorni.length - 1]
+
+    const contestoSettimana = `
+Stiamo lavorando sulla settimana ${primo.giorno} ${primo.num} — ${ultimo.giorno} ${ultimo.num} ${MESI[mese - 1]}.
+
+SITUAZIONE ATTUALE QUESTA SETTIMANA:
+${situazione}
+
+DOMENICHE QUESTA SETTIMANA:
+${domenicheTesto || 'Nessuna domenica in questa settimana.'}
+
+Puoi:
+1. Assegnare/modificare turni di questa settimana
+2. Assegnare domeniche e bilanciare automaticamente
+3. Controllare la copertura chiusura 20:00
+4. Verificare che le ore settimanali siano corrette per tutti
+`
+    window.dispatchEvent(new CustomEvent('maiaAutoMessage', { detail: { message: contestoSettimana } }))
   }
 
   async function pubblicaTurni() {
@@ -816,6 +864,25 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
             {[2025,2026,2027].map(a => <option key={a} value={a}>{a}</option>)}
           </select>
 
+          {isMD && shifts.length > 0 && (
+            <select
+              className="border rounded px-3 py-2 bg-white text-gray-800"
+              value={settimanaSelezionata}
+              onChange={e => setSettimanaSelezionata(e.target.value === '' ? '' : +e.target.value)}
+            >
+              <option value="">Tutto il mese</option>
+              {settimaneMese.map((s, i) => (
+                <option key={i} value={i}>Sett. {i + 1}: {s.label}</option>
+              ))}
+            </select>
+          )}
+          {isMD && settimanaAttiva && (
+            <button onClick={lavoraSuSettimana}
+              className="bg-purple-700 text-white px-4 py-2 rounded hover:bg-purple-800 flex items-center gap-2">
+              ✨ Lavora su questa settimana
+            </button>
+          )}
+
           {!schedule ? (
             <button onClick={createSchedule} className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">
               Crea piano mese
@@ -988,17 +1055,20 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
                       </div>
                     </th>
                   ))}
-                  {giorniOrdinati.map(g => (
-                    <Fragment key={g.data}>
-                      <th className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'}`}>
-                        <div className="text-xs">{g.giorno}</div>
-                        <div className="text-xs text-gray-400">{g.num}</div>
-                      </th>
-                      {isMD && g.domenica && (
-                        <th className="p-2 text-center font-semibold text-gray-700 bg-gray-50 min-w-16">TOT</th>
-                      )}
-                    </Fragment>
-                  ))}
+                  {giorniOrdinati.map(g => {
+                    const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
+                    return (
+                      <Fragment key={g.data}>
+                        <th className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'} ${inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''}`}>
+                          <div className="text-xs">{g.giorno}</div>
+                          <div className="text-xs text-gray-400">{g.num}</div>
+                        </th>
+                        {isMD && g.domenica && (
+                          <th className="p-2 text-center font-semibold text-gray-700 bg-gray-50 min-w-16">TOT</th>
+                        )}
+                      </Fragment>
+                    )
+                  })}
                 </tr>
               </thead>
               <tbody>
@@ -1023,12 +1093,14 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
                       const isPermesso = hasUnavailability(emp.id, g.data)
                       const domenicaBloccata = g.domenica && !isMD
                       const cellBg = g.domenica ? (isMD ? 'bg-purple-50' : 'bg-red-50') : ''
+                      const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
+                      const bordoSettimana = inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''
 
                       const dayCell = isPermesso ? (() => {
                         const assenzaCode = getAssenzaCode(emp.id, g.data)
                         const colore = ASSENZA_COLOR[assenzaCode] ?? 'bg-orange-100 text-orange-800'
                         return (
-                          <td className={`p-1 text-center ${cellBg}`}>
+                          <td className={`p-1 text-center ${cellBg} ${bordoSettimana}`}>
                             <button
                               onClick={() => !domenicaBloccata && cycleAssenza(emp.id, g.data)}
                               disabled={domenicaBloccata}
@@ -1039,7 +1111,7 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
                           </td>
                         )
                       })() : (
-                        <td className={`p-1 text-center ${cellBg}`}>
+                        <td className={`p-1 text-center ${cellBg} ${bordoSettimana}`}>
                           <button
                             onClick={(e) => {
                               if (domenicaBloccata) return
@@ -1339,6 +1411,8 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
         giorni={giorni}
         mese={mese}
         anno={anno}
+        settimanaInizio={settimanaAttiva?.giorni[0]?.data ?? null}
+        settimanaFine={settimanaAttiva?.giorni[settimanaAttiva.giorni.length - 1]?.data ?? null}
       />
     </div>
   )

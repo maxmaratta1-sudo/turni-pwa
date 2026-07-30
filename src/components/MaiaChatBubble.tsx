@@ -14,6 +14,8 @@ interface Props {
   giorni: { data: string }[]
   mese: number
   anno: number
+  settimanaInizio?: string | null
+  settimanaFine?: string | null
 }
 
 const TIPO_LETTER: Record<string, string> = {
@@ -44,7 +46,7 @@ function buildContext(employees: Employee[], shifts: Shift[], giorni: { data: st
  * prompt è specifico per quel negozio, non ha senso mostrarla ad altri store (Stroili).
  * La chiamata ad Anthropic passa sempre da /api/maia-chat: la chiave resta server-side.
  */
-export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, employees, shifts, giorni, mese, anno }: Props) {
+export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, employees, shifts, giorni, mese, anno, settimanaInizio, settimanaFine }: Props) {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Msg[]>([])
   const [input, setInput] = useState('')
@@ -61,7 +63,13 @@ export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, e
       const res = await fetch('/api/maia-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: nextMessages, context: buildContext(employees, shifts, giorni), mese, anno, storeId, scheduleId }),
+        body: JSON.stringify({
+          messages: nextMessages,
+          context: buildContext(employees, shifts, giorni),
+          mese, anno, storeId, scheduleId,
+          settimana_inizio: settimanaInizio ?? undefined,
+          settimana_fine: settimanaFine ?? undefined,
+        }),
       })
       const data = await res.json()
       setMessages(prev => [...prev, { role: 'assistant', content: data.reply || `⚠️ ${data.error ?? 'Errore'}` }])
@@ -89,7 +97,7 @@ export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, e
     }
     window.addEventListener('maiaAutoMessage', handler as EventListener)
     return () => window.removeEventListener('maiaAutoMessage', handler as EventListener)
-  }, [isMD, messages, loading, employees, shifts, giorni, mese, anno, storeId, scheduleId])
+  }, [isMD, messages, loading, employees, shifts, giorni, mese, anno, storeId, scheduleId, settimanaInizio, settimanaFine])
 
   if (!isMD) return null
 

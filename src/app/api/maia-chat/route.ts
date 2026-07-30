@@ -30,6 +30,10 @@ const tools: Anthropic.Tool[] = [
           type: 'boolean',
           description: 'true SOLO quando tipo="riposo" e stai applicando il riposo compensativo per un turno domenicale già confermato da Giacomo — registra anche una R (Recupero) in unavailabilities, non solo lo shift a riposo.',
         },
+        ore: {
+          type: 'number',
+          description: 'SOLO con tipo="mattina" o "pomeriggio": numero esatto di ore del turno (es. 3, 4 o 5) quando stai applicando una riduzione precisa proposta dal bilanciamento domenica — calcola l\'orario reale corretto invece di usare l\'orario fisso standard. Omesso = orario standard fisso per il tipo.',
+        },
       },
       required: ['employee_name', 'data', 'tipo'],
     },
@@ -162,7 +166,7 @@ const isDomenicaTipo = (tipo: string) => tipo === 'domenica_lungo' || tipo === '
  * compensativo domenicale) RIDUCE sempre le ore — non va mai bloccato dal budget.
  * Ritorna un messaggio d'errore se sfora, altrimenti null. */
 async function verificaBudgetSettimanale(
-  scheduleId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string
+  scheduleId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string, oreOverride?: number
 ): Promise<string | null> {
   if (isDomenicaTipo(tipo)) return null // domenica non conta mai nel budget, mai bloccata
   if (tipo === 'riposo') return null // il riposo riduce sempre le ore, non può mai sforare
@@ -185,7 +189,7 @@ async function verificaBudgetSettimanale(
     .filter(s => s.data !== data)
     .filter(s => isFeriale(s.data) && !isDomenicaTipo(s.tipo))
     .reduce((sum, s) => sum + getOreTurno(s.tipo), 0)
-  const oreDopoModifica = oreEsistenti + getOreTurno(tipo)
+  const oreDopoModifica = oreEsistenti + (oreOverride ?? getOreTurno(tipo))
 
   if (oreDopoModifica > oreSettimanali) {
     return `Errore: impossibile assegnare "${tipo}" a ${nome} il ${data} — avrebbe ${oreDopoModifica}h questa settimana (contratto: ${oreSettimanali}h). Proponi un'alternativa con meno ore o un altro giorno.`
@@ -286,14 +290,38 @@ function assertNonDomenicaPerEsclusi(emp: { nome: string; turno_fisso?: string |
   return null
 }
 
-async function upsertShift(scheduleId: string, employeeId: string, data: string, tipo: TurnoTipo) {
-  const orario = tipo !== 'riposo' ? ORARI_TURNO_MD[tipo] : null
+/** Mapping ore → tipo/orario reale per turni variabili (soprattutto cassiere 22h) — usato
+ * quando Maia applica una proposta di riduzione ore precisa (es. bilanciamento domenica),
+ * invece del lookup fisso per tipo che darebbe sempre le stesse ore. */
+function oreToShiftType(ore: number, isMattina: boolean): { tipo: TurnoTipo; ora_inizio: string; ora_fine: string } {
+  if (isMattina) {
+    if (ore === 3) return { tipo: 'mattina_corta', ora_inizio: '10:00', ora_fine: '13:00' }
+    if (ore === 4) return { tipo: 'mattina_corta', ora_inizio: '09:00', ora_fine: '13:00' }
+    if (ore === 5) return { tipo: 'mattina_corta', ora_inizio: '08:00', ora_fine: '13:00' }
+    return { tipo: 'mattina', ora_inizio: '08:00', ora_fine: '14:00' }
+  }
+  if (ore === 3) return { tipo: 'pomeriggio_corto', ora_inizio: '17:00', ora_fine: '20:00' }
+  if (ore === 4) return { tipo: 'pomeriggio_corto', ora_inizio: '16:00', ora_fine: '20:00' }
+  if (ore === 5) return { tipo: 'pomeriggio_corto', ora_inizio: '15:00', ora_fine: '20:00' }
+  return { tipo: 'pomeriggio', ora_inizio: '14:00', ora_fine: '20:00' }
+}
+
+async function upsertShift(scheduleId: string, employeeId: string, data: string, tipo: TurnoTipo, oreOverride?: number) {
+  let orario = tipo !== 'riposo' ? ORARI_TURNO_MD[tipo] : null
+  let tipoFinale: TurnoTipo = tipo
+
+  if (oreOverride !== undefined && (tipo === 'mattina' || tipo === 'pomeriggio')) {
+    const mapped = oreToShiftType(oreOverride, tipo === 'mattina')
+    tipoFinale = mapped.tipo
+    orario = { inizio: mapped.ora_inizio, fine: mapped.ora_fine }
+  }
+
   return supabaseAdmin.from('shifts').upsert(
     {
       schedule_id: scheduleId,
       employee_id: employeeId,
       data,
-      tipo,
+      tipo: tipoFinale,
       ora_inizio: orario?.inizio ?? null,
       ora_fine: orario?.fine ?? null,
     },
@@ -321,9 +349,10 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
     const blocco = assertNonDomenicaPerEsclusi(emp, input.tipo)
     if (blocco) return blocco
-    const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, input.data, input.tipo, emp.ore_settimanali, emp.nome)
+    const oreOverride: number | undefined = typeof input.ore === 'number' ? input.ore : undefined
+    const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, input.data, input.tipo, emp.ore_settimanali, emp.nome, oreOverride)
     if (erroreOre) return erroreOre
-    const { error } = await upsertShift(ctx.scheduleId, emp.id, input.data, input.tipo)
+    const { error } = await upsertShift(ctx.scheduleId, emp.id, input.data, input.tipo, oreOverride)
     if (error) return `Errore salvataggio turno: ${error.message}`
     if (isDomenicaTipo(input.tipo)) {
       const oreDomenica = input.tipo === 'domenica_lungo' ? 5 : 3
@@ -490,7 +519,7 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
 }
 
 export async function POST(req: NextRequest) {
-  const { messages, context, mese, anno, storeId, scheduleId } = await req.json()
+  const { messages, context, mese, anno, storeId, scheduleId, settimana_inizio, settimana_fine } = await req.json()
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return NextResponse.json({ error: 'messages richiesto' }, { status: 400 })
@@ -502,8 +531,11 @@ export async function POST(req: NextRequest) {
     month: 'long',
     day: 'numeric',
   })
+  const settimanaContext = settimana_inizio && settimana_fine
+    ? `\n\n📅 MODALITÀ SETTIMANA ATTIVA: Giacomo sta lavorando specificamente sulla settimana ${settimana_inizio} — ${settimana_fine}. Concentra le tue risposte e le tue azioni SOLO su questa settimana, salvo richiesta esplicita diversa. Il bilanciamento domenica usa comunque sempre solo i turni della settimana pertinente (calcolato automaticamente dal tool), non serve fare calcoli mensili.`
+    : ''
   const dataContext = mese && anno
-    ? `Oggi è ${oggi}. Il mese corrente per la pianificazione turni è ${mese}/${anno}.`
+    ? `Oggi è ${oggi}. Il mese corrente per la pianificazione turni è ${mese}/${anno}.${settimanaContext}`
     : `Oggi è ${oggi}.`
 
   let regoleCustomText = ''
@@ -640,9 +672,13 @@ quella settimana (non ore generiche per contratto).
 2. Se il risultato propone di ridurre un giorno specifico o un riposo completo → riporta
    ESATTAMENTE quella proposta a Giacomo (giorno/i e ore già calcolati automaticamente).
    Romeo: le opzioni proposte sono SEMPRE tra Lun/Mer/Ven (mai Mar/Gio/Sab) — non serve verificarlo tu.
-3. Solo dopo che Giacomo conferma esplicitamente ("sì"/"confermo") → usa update_shift con
-   tipo "riposo" E recupero_domenicale:true (o le ore ridotte proposte, senza il flag se
-   non è un riposo completo) su quella data per applicare la modifica.
+3. Solo dopo che Giacomo conferma esplicitamente ("sì"/"confermo") → usa update_shift per
+   applicare la modifica su quella data:
+   - Se la proposta era un riposo completo → tipo "riposo" E recupero_domenicale:true.
+   - Se la proposta era una riduzione a un numero preciso di ore (es. "da 5h a 3h") →
+     tipo "mattina" o "pomeriggio" (a seconda della direzione originale del turno) E il
+     parametro ore impostato esattamente al nuovo valore proposto — così l'orario reale
+     viene calcolato correttamente invece di usare l'orario fisso standard del tipo.
 4. Conferma: "✅ [Nome] riposa/riduce [giorno] per compensare le ore domenicali."
 NON chiedere a Giacomo di scegliere tu il giorno per 22h/28h — il giorno è già trovato
 automaticamente dal tool. Per tutti gli altri contratti (35h/36h) resta invece il
