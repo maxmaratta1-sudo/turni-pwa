@@ -118,6 +118,18 @@ const tools: Anthropic.Tool[] = [
       properties: {},
     },
   },
+  {
+    name: 'set_alternanza',
+    description: 'Imposta chi fa mattina questa settimana tra Max e Romeo — da usare SOLO se Giacomo lo chiede esplicitamente di cambiare l\'alternanza, non per consultare chi tocca (usa il contesto già calcolato per quello).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        settimana_inizio: { type: 'string', description: 'Data lunedì della settimana YYYY-MM-DD' },
+        nome_mattina: { type: 'string', enum: ['Romeo', 'Max'], description: 'Chi fa mattina da questa settimana in poi' },
+      },
+      required: ['settimana_inizio', 'nome_mattina'],
+    },
+  },
 ]
 
 interface ToolCtx {
@@ -134,6 +146,38 @@ async function findEmployee(nome: string, storeId: string) {
     .maybeSingle()
   if (error || !data) return null
   return data
+}
+
+function altroNome(nome: string): string {
+  return nome === 'Romeo' ? 'Max' : 'Romeo'
+}
+
+function getWeekIndex(dateStr: string): number {
+  const d = new Date(dateStr + 'T00:00:00')
+  const startOfYear = new Date(d.getFullYear(), 0, 1)
+  return Math.floor((d.getTime() - startOfYear.getTime()) / (7 * 24 * 60 * 60 * 1000))
+}
+
+/** Calcola chi fa mattina/pomeriggio (Max/Romeo) per la settimana data, a partire dall'ultimo riferimento salvato. */
+async function chiMattina(storeId: string, dataSettimana: string): Promise<{ mattina: string; pomeriggio: string }> {
+  const { data: rif } = await supabaseAdmin
+    .from('turni_alternanza')
+    .select('*')
+    .eq('store_id', storeId)
+    .order('settimana_riferimento', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (!rif) return { mattina: 'Romeo', pomeriggio: 'Max' }
+
+  const settRif = getWeekIndex(rif.settimana_riferimento)
+  const settCorrente = getWeekIndex(dataSettimana)
+  const diff = settCorrente - settRif
+
+  const nomeMattina = diff % 2 === 0 ? rif.nome_mattina : altroNome(rif.nome_mattina)
+  const nomePomeriggio = altroNome(nomeMattina)
+
+  return { mattina: nomeMattina, pomeriggio: nomePomeriggio }
 }
 
 /** Lunedì della settimana ISO contenente `data` (YYYY-MM-DD). */
@@ -406,6 +450,16 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     return `OK: turno di ${emp.nome} impostato su "${input.tipo}" per ${modificati} giorni (${input.data_inizio} → ${input.data_fine})${saltati > 0 ? `, ${saltati} domeniche escluse` : ''}${bloccatiPerOre > 0 ? `, ${bloccatiPerOre} giorni saltati per superamento ore contrattuali` : ''}.${notaOre}`
   }
 
+  if (toolName === 'set_alternanza') {
+    const { error } = await supabaseAdmin.from('turni_alternanza').insert({
+      store_id: ctx.storeId,
+      settimana_riferimento: input.settimana_inizio,
+      nome_mattina: input.nome_mattina,
+    })
+    if (error) return `Errore salvataggio alternanza: ${error.message}`
+    return `OK: da questa settimana (${input.settimana_inizio}) ${input.nome_mattina} fa mattina, ${altroNome(input.nome_mattina)} fa pomeriggio. Le settimane successive continueranno ad alternarsi automaticamente da questo riferimento.`
+  }
+
   if (toolName === 'get_employee_shifts') {
     const emp = await findEmployee(input.employee_name, ctx.storeId)
     if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
@@ -531,8 +585,13 @@ export async function POST(req: NextRequest) {
     month: 'long',
     day: 'numeric',
   })
+  let alternanzaContext = ''
+  if (storeId && settimana_inizio) {
+    const alternanza = await chiMattina(storeId, settimana_inizio)
+    alternanzaContext = `\n\n🔄 ALTERNANZA MAX/ROMEO QUESTA SETTIMANA (calcolato automaticamente — NON chiedere a Giacomo):\n- ${alternanza.mattina}: fa MATTINA questa settimana\n- ${alternanza.pomeriggio}: fa POMERIGGIO questa settimana\nUsa il tool set_alternanza SOLO se Giacomo chiede esplicitamente di cambiare chi fa mattina.`
+  }
   const settimanaContext = settimana_inizio && settimana_fine
-    ? `\n\n📅 MODALITÀ SETTIMANA ATTIVA: Giacomo sta lavorando specificamente sulla settimana ${settimana_inizio} — ${settimana_fine}. Concentra le tue risposte e le tue azioni SOLO su questa settimana, salvo richiesta esplicita diversa. Il bilanciamento domenica usa comunque sempre solo i turni della settimana pertinente (calcolato automaticamente dal tool), non serve fare calcoli mensili.`
+    ? `\n\n📅 MODALITÀ SETTIMANA ATTIVA: Giacomo sta lavorando specificamente sulla settimana ${settimana_inizio} — ${settimana_fine}. Concentra le tue risposte e le tue azioni SOLO su questa settimana, salvo richiesta esplicita diversa. Il bilanciamento domenica usa comunque sempre solo i turni della settimana pertinente (calcolato automaticamente dal tool), non serve fare calcoli mensili.${alternanzaContext}`
     : ''
   const dataContext = mese && anno
     ? `Oggi è ${oggi}. Il mese corrente per la pianificazione turni è ${mese}/${anno}.${settimanaContext}`
@@ -603,7 +662,7 @@ REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
 1. Gilda e Tony: sempre mattina 08-14, mai domenica
 2. Yuri: Lun/Mer/Ven 08-16 in sala (turno yuri_full); Mar/Gio 13-16 in sala (turno yuri_pomeriggio, mattina in salumeria); Sab 08-14; Dom riposo
 3. Carlo: Mar e Gio obbligatoriamente mattina; altri giorni preferenza mattina, pomeriggio solo se serve bilanciare le ore
-4. Max: sempre 5h — mattina_corta 08-13 o pomeriggio_corto 14-19; alterna con Romeo a settimane alterne (turni standard da 6h per Romeo)
+4. Max: sempre 5h — mattina_corta 08-13 o pomeriggio_corto 14-19; alterna con Romeo a settimane alterne (turni standard da 6h per Romeo). Chi tocca mattina/pomeriggio questa settimana è già calcolato automaticamente (vedi sezione ALTERNANZA sopra, se presente) — NON chiedere a Giacomo chi tocca, usa quel dato. Cambialo solo se Giacomo lo chiede esplicitamente (tool set_alternanza).
 5. Cassiere 22h (Marilena, Angelica, Elisa, Damiana): 2 di mattina + 2 di pomeriggio ogni giorno
 6. Fascia 13-16: sempre Yuri presente + minimo 1 altro cassiere
 7. Chiusura 20:00: minimo 3 persone (sabato 4)
@@ -750,7 +809,13 @@ COMPORTAMENTO:
       const toolResults: Anthropic.ToolResultBlockParam[] = []
       for (const block of toolUseBlocks) {
         toolUsed = true
-        const result = await executeTool(block.name, block.input, { storeId, scheduleId })
+        let result: string
+        try {
+          result = await executeTool(block.name, block.input, { storeId, scheduleId })
+        } catch (toolErr) {
+          console.error('TOOL ERROR:', block.name, JSON.stringify(block.input), String(toolErr))
+          result = `Errore interno eseguendo il tool "${block.name}": ${String(toolErr)}`
+        }
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
       }
       anthropicMessages.push({ role: 'user', content: toolResults })
