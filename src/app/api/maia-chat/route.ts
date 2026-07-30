@@ -152,9 +152,18 @@ function getOreTurno(tipo: string): number {
 /** Verifica che, applicando `tipo` a `data` per `employeeId`, il totale ore della
  * settimana (Lun-Dom) non superi le ore contrattuali. Ritorna un messaggio d'errore
  * se sfora, altrimenti null. */
+const isDomenicaTipo = (tipo: string) => tipo === 'domenica_lungo' || tipo === 'domenica_corto'
+
+/** Verifica che, applicando `tipo` a `data` per `employeeId`, il totale ore della
+ * settimana (Lun-Ven+Sab, esclusa domenica) non superi le ore contrattuali. La domenica
+ * è sempre extra — compensata dal riposo nella settimana precedente, non conta mai nel
+ * budget settimanale e non viene mai bloccata per eccesso ore. Ritorna un messaggio
+ * d'errore se sfora, altrimenti null. */
 async function verificaBudgetSettimanale(
   scheduleId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string
 ): Promise<string | null> {
+  if (isDomenicaTipo(tipo)) return null // domenica non conta mai nel budget, mai bloccata
+
   const monday = getMonday(data)
   const sunday = new Date(monday)
   sunday.setDate(sunday.getDate() + 6)
@@ -167,8 +176,11 @@ async function verificaBudgetSettimanale(
     .gte('data', toDateStr(monday))
     .lte('data', toDateStr(sunday))
 
+  const isFeriale = (d: string) => new Date(d + 'T00:00:00').getDay() !== 0 // 0 = domenica
+
   const oreEsistenti = (weekShifts || [])
     .filter(s => s.data !== data)
+    .filter(s => isFeriale(s.data) && !isDomenicaTipo(s.tipo))
     .reduce((sum, s) => sum + getOreTurno(s.tipo), 0)
   const oreDopoModifica = oreEsistenti + getOreTurno(tipo)
 
@@ -177,8 +189,6 @@ async function verificaBudgetSettimanale(
   }
   return null
 }
-
-const isDomenicaTipo = (tipo: string) => tipo === 'domenica_lungo' || tipo === 'domenica_corto'
 
 /** Gilda e Tony sono escluse definitivamente dai turni domenicali — nessuna eccezione, nemmeno via Maia. */
 function assertNonDomenicaPerEsclusi(emp: { nome: string; turno_fisso?: string | null }, tipo: string): string | null {
@@ -494,6 +504,12 @@ Prima di confermare qualsiasi modifica ai turni, Maia DEVE verificare che:
 4. Nessun turno inizi prima delle 08:00
 
 Se una modifica richiesta violerebbe questi vincoli, Maia DEVE rifiutare e spiegare perché.
+
+DOMENICA — REGOLA ORE:
+I turni domenicali (domenica_lungo/domenica_corto) NON contano nel budget
+settimanale contrattuale. La domenica è sempre extra, compensata dal riposo
+nella settimana PRECEDENTE. Non bloccare mai un turno domenicale per eccesso ore.
+
 I tool update_shift e update_shift_week verificano automaticamente il budget ore
 settimanale e rifiutano l'operazione se la sforerebbe — se ricevi un errore di questo
 tipo, NON insistere con lo stesso turno: proponi a Giacomo un'alternativa valida
