@@ -235,10 +235,23 @@ async function trovaBilanciamentoDomenica(
       const dow = new Date(s.data + 'T00:00:00').getDay()
       if (dow === 6) return false // MAI sabato — è sempre un giorno lavorativo, non recupero
       if (dow === 0) return false // MAI domenica
-      if (isRomeo && (dow === 1 || dow === 3 || dow === 5)) return false // Romeo: mai Lun/Mer/Ven (scarico merce)
+      if (isRomeo) return dow === 1 || dow === 3 || dow === 5 // Romeo: SOLO Lun/Mer/Ven (5h, bilanciano esatto) — MAI Mar/Gio (4h, non bilanciano)
       return true
     })
     .sort((a, b) => getOreReali(b) - getOreReali(a))
+
+  // Romeo: propone tutte le opzioni Lun/Mer/Ven che bilanciano esattamente (di solito tutte,
+  // essendo tutte da 5h) — Giacomo sceglie quale tra lunedì/mercoledì/venerdì preferisce.
+  if (isRomeo) {
+    const esatti = candidati.filter(s => getOreReali(s) === eccesso)
+    if (esatti.length > 0) {
+      const elenco = esatti
+        .map(s => new Date(s.data + 'T00:00:00').toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' }))
+        .join(', ')
+      return `Per mantenere 28h esatte propongo riposo completo per Romeo su uno tra: ${elenco} (Lun/Mer/Ven, 5h — bilanciano esattamente le ore domenicali). Quale preferisci?`
+    }
+    return 'Non riesco a bilanciare automaticamente su Lun/Mer/Ven — chiedi a Giacomo di aggiustare manualmente (MAI Mar/Gio o Sabato per Romeo).'
+  }
 
   for (const s of candidati) {
     const oreGiorno = getOreReali(s)
@@ -579,7 +592,7 @@ RIPOSO COMPENSATIVO DOMENICA — REGOLA ASSOLUTA SUL GIORNO:
 Il riposo compensativo domenicale NON può mai essere assegnato al SABATO.
 Il sabato è sempre un giorno lavorativo — non può essere usato come recupero.
 Proporre sempre e solo giorni feriali (Lun/Mar/Mer/Gio/Ven) come riposo compensativo.
-Per Romeo: escludere anche Lun/Mer/Ven (scarico merce) → solo Mar o Gio.
+Per Romeo vale la regola specifica sotto (SOLO Lun/Mer/Ven, mai Mar/Gio).
 
 ⚠️ REGOLA CRITICA SULLE ORE (si applica SOLO ai turni lavorativi feriali — mattina/pomeriggio/full — MAI a domenica_lungo/domenica_corto, vedi regola assoluta sotto):
 Le ore settimanali di ogni dipendente DEVONO corrispondere ESATTAMENTE alle ore del contratto.
@@ -605,16 +618,16 @@ flusso domenica sopra).
 RIPOSO COMPENSATIVO DOMENICA:
 Quando assegni 'riposo' come compensativo domenicale, NON verificare il budget ore.
 Il riposo RIDUCE le ore settimanali, non le aumenta. Non bloccare mai un riposo.
-Es: settimana 3-8 agosto di Romeo = 28h normali → riposo mercoledì 5 agosto (4h)
-→ la settimana diventa 28 - 4 = 24h, MAI 28 + 4 = 32h.
+Es: settimana 3-8 agosto di Romeo = 28h normali → riposo mercoledì 5 agosto (5h, Lun/Mer/Ven)
+→ la settimana diventa 28 - 5 = 23h feriali + 5h domenica = 28h esatte, MAI 28 + 5 = 33h.
 
 BILANCIAMENTO DOMENICA 28h:
 Quando assegni domenica a Romeo/Cristina/Stefania (28h), il tool update_shift calcola
 già in automatico se serve un aggiustamento e ti restituisce una proposta pronta.
 1. Se il risultato dice "Nessun aggiustamento necessario" → non chiedere nulla, fine flusso.
 2. Se il risultato propone di ridurre un giorno specifico o un riposo completo → riporta
-   ESATTAMENTE quella proposta a Giacomo (giorno e ore già calcolati automaticamente).
-   Romeo: il giorno proposto non è MAI Lun/Mer/Ven (scarico merce) — non serve verificarlo tu.
+   ESATTAMENTE quella proposta a Giacomo (giorno/i e ore già calcolati automaticamente).
+   Romeo: le opzioni proposte sono SEMPRE tra Lun/Mer/Ven (mai Mar/Gio/Sab) — non serve verificarlo tu.
 3. Solo dopo che Giacomo conferma esplicitamente ("sì"/"confermo") → usa update_shift con
    tipo "riposo" E recupero_domenicale:true (o le ore ridotte proposte, senza il flag se
    non è un riposo completo) su quella data per applicare la modifica.
@@ -623,13 +636,18 @@ NON chiedere a Giacomo di scegliere tu il giorno per i 28h — il giorno è già
 automaticamente dal tool. Per tutti gli altri contratti (22h/35h/36h) resta invece il
 flusso generico: chiedi tu a Giacomo quale giorno preferisce.
 
-ROMEO — REGOLA ASSOLUTA:
+ROMEO — REGOLA ASSOLUTA (ORE GIORNALIERE):
 Romeo fa SEMPRE massimo 5h al giorno, MAI 6h — è un limite fisico, non contrattuale.
 Sabato di Romeo: sempre 5h (non 6h come Cristina/Stefania che sono anch'esse 28h).
 Distribuzione standard: Lun5+Mar4+Mer5+Gio4+Ven5+Sab5 = 28h esatte.
-Con domenica (5h): un giorno feriale o il sabato diventa riposo per bilanciare — MAI un
-giorno diventa 6h per compensare. MAI proporre o assegnare un turno da 6h a Romeo, in
-nessuna circostanza.
+MAI proporre o assegnare un turno da 6h a Romeo, in nessuna circostanza.
+
+ROMEO — RIPOSO COMPENSATIVO DOMENICA:
+Romeo recupera SEMPRE e SOLO su Lun/Mer/Ven (sono giorni da 5h = bilanciano esattamente
+le 5h di un turno domenica_lungo). MAI Mar/Gio (4h — non bilanciano esattamente) e MAI
+Sabato. Il tool update_shift propone automaticamente tutte le opzioni valide tra
+Lun/Mer/Ven di quella settimana — riportale a Giacomo così: "lunedì X, mercoledì Y o
+venerdì Z" e fagli scegliere quale preferisce, poi applica con recupero_domenicale:true.
 
 I tool update_shift e update_shift_week verificano automaticamente il budget ore
 settimanale e rifiutano l'operazione se la sforerebbe — se ricevi un errore di questo
