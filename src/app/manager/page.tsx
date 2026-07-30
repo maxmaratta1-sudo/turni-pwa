@@ -785,12 +785,19 @@ Puoi:
     return [...base, '08/14', '14/20', '08/20']
   }
 
-  /** Converte l'orario scelto nel popup ("HH/HH" o "—") nel tipo turno + ora_inizio/ora_fine. */
-  function parseOrarioSelezionato(orario: string): { tipo: TurnoTipo; ora_inizio: string | null; ora_fine: string | null } {
+  /** Converte l'orario scelto nel popup ("HH/HH" o "—") nel tipo turno + ora_inizio/ora_fine.
+   * Max (30h) usa sempre mattina_corta/pomeriggio_corto (5h fisse, mai lo standard 6h) — la sua
+   * fascia pomeriggio termina alle 19:00, non alle 20:00 come gli altri contratti, quindi va
+   * gestita esplicitamente per non ricadere nel fallback "mattina" (bug: tipo sbagliato con
+   * orario pomeridiano). */
+  function parseOrarioSelezionato(orario: string, emp?: Employee): { tipo: TurnoTipo; ora_inizio: string | null; ora_fine: string | null } {
     if (orario === '—') return { tipo: 'riposo', ora_inizio: null, ora_fine: null }
     const [iniN, finN] = orario.split('/').map(n => parseInt(n, 10))
     const ora_inizio = `${String(iniN).padStart(2, '0')}:00`
     const ora_fine = `${String(finN).padStart(2, '0')}:00`
+    if (emp?.nome === 'Max' && emp.ore_settimanali === 30) {
+      return finN === 19 ? { tipo: 'pomeriggio_corto', ora_inizio, ora_fine } : { tipo: 'mattina_corta', ora_inizio, ora_fine }
+    }
     if (iniN === 8 && finN === 16) return { tipo: 'yuri_full', ora_inizio, ora_fine }
     if (iniN === 13 && finN === 16) return { tipo: 'yuri_pomeriggio', ora_inizio, ora_fine }
     if (iniN === 8 && finN === 20) return { tipo: 'full', ora_inizio, ora_fine }
@@ -800,7 +807,8 @@ Puoi:
 
   async function handleCellSelect(empId: string, data: string, orario: string) {
     if (!schedule) return
-    const { tipo, ora_inizio, ora_fine } = parseOrarioSelezionato(orario)
+    const emp = employees.find(e => e.id === empId)
+    const { tipo, ora_inizio, ora_fine } = parseOrarioSelezionato(orario, emp)
     const existing = getShift(empId, data)
 
     if (existing) {
