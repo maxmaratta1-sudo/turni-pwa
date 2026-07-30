@@ -398,8 +398,9 @@ Puoi:
   async function resetMese() {
     if (!schedule) return
     const nomeMese = MESI[mese - 1]
-    if (!window.confirm(`Sei sicuro? Tutti i turni di ${nomeMese} verranno cancellati.`)) return
+    if (!window.confirm(`Sei sicuro? Verranno cancellati TUTTI i turni E tutti i permessi di ${nomeMese} ${anno}.`)) return
     await supabase.from('shifts').delete().eq('schedule_id', schedule.id)
+    await supabase.from('unavailabilities').delete().eq('schedule_id', schedule.id)
     window.location.reload()
   }
 
@@ -884,7 +885,7 @@ Puoi:
             {[2025,2026,2027].map(a => <option key={a} value={a}>{a}</option>)}
           </select>
 
-          {isMD && shifts.length > 0 && (
+          {isMD && schedule && (
             <select
               className="border rounded px-3 py-2 bg-white text-gray-800"
               value={settimanaSelezionata}
