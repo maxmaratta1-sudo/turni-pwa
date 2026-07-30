@@ -47,7 +47,7 @@ const TURNO_COLOR: Record<string, string> = {
   yuri_full: 'bg-blue-900 text-blue-50',
   yuri_pomeriggio: 'bg-sky-100 text-sky-800',
   mattina_corta: 'bg-cyan-100 text-cyan-800',
-  pomeriggio_corto: 'bg-orange-50 text-orange-600',
+  pomeriggio_corto: 'bg-teal-100 text-teal-800',
 }
 // Ore lavorate per tipo turno — usato per la colonna TOT settimanale (solo MD).
 const ORE_PER_TURNO: Record<string, number> = {

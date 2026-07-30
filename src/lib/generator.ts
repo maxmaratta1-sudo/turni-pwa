@@ -170,6 +170,16 @@ function orarioPomeriggio(ore: number): { inizio: string; fine: string } {
   return { inizio: formatOra(20 - ore), fine: '20:00' }
 }
 
+// Cassiere 22h: 2 gruppi fissi (mattina/pomeriggio), invertiti a settimane alterne —
+// garantisce SEMPRE 2 di mattina + 2 di pomeriggio ogni giorno, mai tutte sullo stesso turno.
+const CASSIERE22_GRUPPO_A = ['Angelica', 'Elisa']       // mattina quando la settimana è pari
+const CASSIERE22_GRUPPO_B = ['Damiana', 'Marilena']     // pomeriggio quando la settimana è pari
+
+function isMattinaCassiere22(nome: string, weekIsEven: boolean): boolean {
+  const inGruppoA = CASSIERE22_GRUPPO_A.includes(nome)
+  return weekIsEven ? inGruppoA : !inGruppoA
+}
+
 // Alternanza sabati (settimane pari/dispari) — Carlo e il "gruppo 2" alternano
 // mattina/pomeriggio del sabato invece di avere una direzione fissa. Yuri resta
 // SEMPRE mattina 08-14 di sabato (regola propria, non tocca questa alternanza).
@@ -219,8 +229,6 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
     if (!unavailMap[u.employee_id]) unavailMap[u.employee_id] = new Set()
     unavailMap[u.employee_id].add(u.data)
   }
-
-  const cassieri22 = employees.filter(e => e.priorita_cassa === 1)
 
   // Per ogni dipendente con distribuzione variabile, precalcola il piano ore Lun-Ven
   // PER SETTIMANA ISO (si ricalcola ogni volta che cambia settimana, azzerando il piano).
@@ -314,8 +322,7 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
       // R4 — Cassiere 22h: rotazione a coppie mattina/pomeriggio, ore variabili da distribuzione.
       // Mattina = orario flessibile end-anchored a 13:00 (vedi orarioMattinaFlessibile).
       else if (emp.priorita_cassa === 1) {
-        const idx = cassieri22.findIndex(e => e.id === emp.id)
-        const mattinaOra = (giorno.getDate() + idx) % 4 < 2
+        const mattinaOra = isMattinaCassiere22(emp.nome, weekIsEven)
         if (dayOfWeek === 6) {
           // Sabato: sempre 5h, direzione alternata a settimane alterne (gruppo 2).
           const mattinaSabato = direzioneSabatoGruppo2(emp.nome, weekIsEven)
@@ -372,7 +379,45 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
     }
   }
 
+  correggiChiusura(shifts, employees)
+
   return shifts
+}
+
+/** R7 — Chiusura 20:00: minimo 3 persone (sabato 4). Pass di correzione post-generazione:
+ * se un giorno non raggiunge la copertura minima, converte turni mattina di cassiere
+ * (mai Gilda/Tony/Yuri/Max, regole fisse) in pomeriggio a parità di ore già assegnate. */
+function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[]): void {
+  const perGiorno: Record<string, Omit<Shift, 'id' | 'created_at'>[]> = {}
+  for (const s of shifts) {
+    if (!perGiorno[s.data]) perGiorno[s.data] = []
+    perGiorno[s.data].push(s)
+  }
+
+  for (const [data, dayShifts] of Object.entries(perGiorno)) {
+    const isSabato = new Date(data + 'T00:00:00').getDay() === 6
+    const minRichiesto = isSabato ? 4 : 3
+    let chiusura = dayShifts.filter(s => s.ora_fine === '20:00').length
+    if (chiusura >= minRichiesto) continue
+
+    const candidati = dayShifts
+      .filter(s => {
+        const emp = employees.find(e => e.id === s.employee_id)
+        if (!emp || ['Gilda', 'Tony', 'Yuri', 'Max'].includes(emp.nome)) return false
+        return s.tipo === 'mattina' && s.ora_fine !== '20:00'
+      })
+      .sort((a, b) => oreFromOrario(b.ora_inizio, b.ora_fine) - oreFromOrario(a.ora_inizio, a.ora_fine))
+
+    for (const s of candidati) {
+      if (chiusura >= minRichiesto) break
+      const ore = oreFromOrario(s.ora_inizio, s.ora_fine)
+      const nuovoOrario = orarioPomeriggio(ore)
+      s.tipo = 'pomeriggio'
+      s.ora_inizio = nuovoOrario.inizio
+      s.ora_fine = nuovoOrario.fine
+      chiusura++
+    }
+  }
 }
 
 /** Numero di settimana ISO (usato per l'alternanza settimanale Max/Romeo e 28h). */
