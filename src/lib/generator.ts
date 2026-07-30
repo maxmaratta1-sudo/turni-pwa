@@ -144,7 +144,7 @@ const CONFIG_ORE_CONTRATTO: Record<number, { sabato: number; min: number; max: n
 
 // R5 — 28h con orario fisso per giorno feriale (Cristina/Stefania). getDay(): 1=Lun...5=Ven.
 // Lun5/Mar4/Mer5/Gio4/Ven4 = 22h feriali + Sab6 = 28h esatte (mattina Lun/Mer/Ven, pomeriggio Mar/Gio).
-const ORE_28H_FERIALI: Record<number, number> = { 1: 5, 2: 4, 3: 5, 4: 4, 5: 4 }
+export const ORE_28H_FERIALI: Record<number, number> = { 1: 5, 2: 4, 3: 5, 4: 4, 5: 4 }
 
 /** Limite fisico di ore massime in un singolo giorno per dipendente — Romeo e Max hanno
  * un tetto di 5h anche se il loro contratto (28h/30h) userebbe altrimenti giornate più

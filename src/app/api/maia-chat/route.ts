@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabaseAdmin } from '@/lib/supabase'
 import { ORARI_TURNO_MD, TurnoTipo } from '@/types'
-import { oreFromOrario } from '@/lib/generator'
+import { oreFromOrario, ORE_28H_FERIALI } from '@/lib/generator'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -433,12 +433,19 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     let modificati = 0
     let saltati = 0
     let bloccatiPerOre = 0
+    const isCristinaStefania = emp.ore_settimanali === 28 && emp.nome !== 'Romeo'
     for (const d of dates) {
       const dayOfWeek = new Date(d + 'T00:00:00').getDay()
       if (dayOfWeek === 0 && !isTipoDomenica) { saltati++; continue }
-      const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, d, input.tipo, emp.ore_settimanali, emp.nome)
+      // Cristina/Stefania (28h): ore giornaliere fisse e diverse per giorno (mai lo stesso
+      // orario standard tutti i giorni) — sabato 6h, feriali secondo ORE_28H_FERIALI.
+      let oreOverride: number | undefined
+      if (isCristinaStefania && (input.tipo === 'mattina' || input.tipo === 'pomeriggio')) {
+        oreOverride = dayOfWeek === 6 ? 6 : ORE_28H_FERIALI[dayOfWeek]
+      }
+      const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, d, input.tipo, emp.ore_settimanali, emp.nome, oreOverride)
       if (erroreOre) { bloccatiPerOre++; continue }
-      const { error } = await upsertShift(ctx.scheduleId, emp.id, d, input.tipo)
+      const { error } = await upsertShift(ctx.scheduleId, emp.id, d, input.tipo, oreOverride)
       if (!error) modificati++
     }
     if (modificati === 0 && bloccatiPerOre > 0) {
@@ -667,6 +674,19 @@ REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
 6. Fascia 13-16: sempre Yuri presente + minimo 1 altro cassiere
 7. Chiusura 20:00: minimo 3 persone (sabato 4)
 8. Cristina e Stefania: 3 mattine + 3 pomeriggi a settimana ciascuna (Lun/Mer/Ven mattina, Mar/Gio/Sab pomeriggio)
+
+CRISTINA E STEFANIA (28h) — REGOLA ORE:
+MAI assegnare 6h per 6 giorni = 36h. Budget settimanale: 28h esatte.
+Sabato: 6h fisso.
+Lun-Ven: 22h totali in 5 giorni → distribuire come 5+4+5+4+4 (Lun/Mer 5h, Mar/Gio/Ven 4h) — MAI lo stesso orario tutti i giorni.
+I tool update_shift/update_shift_week calcolano già in automatico l'orario corretto per giorno quando assegni "mattina"/"pomeriggio" a Cristina o Stefania — non serve specificare tu le ore manualmente, ma se Giacomo chiede ore diverse dal pattern standard usa il parametro "ore" per un giorno specifico.
+Orari corretti risultanti:
+- Mattina 4h → 09/13
+- Mattina 5h → 08/13
+- Pomeriggio 4h → 16/20
+- Pomeriggio 5h → 15/20
+- Pomeriggio 6h → 14/20 (solo sabato)
+Per sabato usa SEMPRE tipo "mattina" o "pomeriggio" (mai "mattina_corta"/"pomeriggio_corto", quelli sono solo per le ore ridotte nei giorni feriali) — il tool applica automaticamente le 6h corrette.
 
 REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente):
 - Il supermercato è aperto 08:00–13:00
