@@ -32,10 +32,14 @@ const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
   domenica_lungo: 'domenica_lungo', domenica_corto: 'domenica_corto',
   yuri_full: 'yuri_full', yuri_pomeriggio: 'yuri_pomeriggio',
   mattina_corta: 'pomeriggio_corto', pomeriggio_corto: 'mattina_corta',
+  // Turni brevi — casi eccezionali, non fanno parte del ciclo standard (si assegnano solo dal popup/Maia).
+  turno_breve_11_14: 'turno_breve_11_14', turno_breve_12_15: 'turno_breve_12_15',
+  turno_breve_13_16: 'turno_breve_13_16', turno_breve_17_20: 'turno_breve_17_20',
 }
 const TURNO_LABEL: Record<string, string> = {
   mattina: 'M', pomeriggio: 'Pm', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC',
   yuri_full: 'YF', yuri_pomeriggio: 'Y', mattina_corta: 'M5', pomeriggio_corto: 'P5',
+  turno_breve_11_14: '11/14', turno_breve_12_15: '12/15', turno_breve_13_16: '13/16', turno_breve_17_20: '17/20',
 }
 const TURNO_COLOR: Record<string, string> = {
   mattina: 'bg-blue-100 text-blue-800',
@@ -48,6 +52,11 @@ const TURNO_COLOR: Record<string, string> = {
   domenica_lungo: 'bg-purple-200 text-purple-900',
   domenica_corto: 'bg-purple-100 text-purple-800',
   riposo: 'bg-gray-100 text-gray-400',
+  // Stesso colore rosa per tutti i turni brevi — riconoscibili a colpo d'occhio come eccezione.
+  turno_breve_11_14: 'bg-pink-100 text-pink-800',
+  turno_breve_12_15: 'bg-pink-100 text-pink-800',
+  turno_breve_13_16: 'bg-pink-100 text-pink-800',
+  turno_breve_17_20: 'bg-pink-100 text-pink-800',
 }
 // Ore lavorate per tipo turno — usato per la colonna TOT settimanale (solo MD).
 const ORE_PER_TURNO: Record<string, number> = {
@@ -56,6 +65,7 @@ const ORE_PER_TURNO: Record<string, number> = {
   yuri_full: 6, yuri_pomeriggio: 3,
   domenica_lungo: 5, domenica_corto: 3,
   riposo: 0,
+  turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
 }
 
 const ASSENZA_LABEL: Record<string, string> = {
@@ -78,6 +88,7 @@ const TURNO_ORARIO_MD: Record<string, string> = {
   yuri_full: '8/16', yuri_pomeriggio: '13/16',
   domenica_lungo: '8/13', domenica_corto: '10/13',
   riposo: '—',
+  turno_breve_11_14: '11/14', turno_breve_12_15: '12/15', turno_breve_13_16: '13/16', turno_breve_17_20: '17/20',
 }
 
 function formatOraShort(time?: string | null): string {
@@ -544,6 +555,9 @@ Puoi:
             '8/16': [191, 219, 254],   // yuri_full
             '13/16': [191, 219, 254],  // yuri_pomeriggio
             '14/19': [254, 237, 213],  // pomeriggio_corto (Max) — stesso colore di pomeriggio
+            '11/14': [252, 231, 243],  // turno_breve_11_14
+            '12/15': [252, 231, 243],  // turno_breve_12_15
+            '17/20': [252, 231, 243],  // turno_breve_17_20
           }
           const colorStroili: Record<string, [number, number, number]> = {
             M: [219, 234, 254], Pm: [254, 237, 213], F: [220, 252, 231], '—': [243, 244, 246],
@@ -748,6 +762,9 @@ Puoi:
     }
   }
 
+  // Turni brevi (3h, casi eccezionali) — disponibili per tutti i dipendenti MD su richiesta di Giacomo.
+  const ORARI_TURNO_BREVE = ['11/14', '12/15', '13/16', '17/20']
+
   /** Orari validi per cella MD, in base alle ore settimanali contrattuali del dipendente
    * (evita che il click ciclico assegni un turno con più ore di quante ne consenta il contratto). */
   function getOrariValidi(oreSettimanali: number): string[] {
@@ -761,6 +778,7 @@ Puoi:
       '17/20',                    // pomeriggio 3h
       '16/20',                    // pomeriggio 4h
       '15/20',                    // pomeriggio 5h
+      ...ORARI_TURNO_BREVE,
     ]
 
     if (oreSettimanali === 28) return [
@@ -771,6 +789,7 @@ Puoi:
       '16/20',                    // pomeriggio 4h
       '15/20',                    // pomeriggio 5h
       '14/20',                    // pomeriggio 6h
+      ...ORARI_TURNO_BREVE,
     ]
 
     if (oreSettimanali === 35) return [
@@ -779,6 +798,7 @@ Puoi:
       '08/14',                    // mattina 6h
       '15/20',                    // pomeriggio 5h
       '14/20',                    // pomeriggio 6h
+      ...ORARI_TURNO_BREVE,
     ]
 
     if (oreSettimanali === 30) return [
@@ -786,6 +806,7 @@ Puoi:
       '08/13',  // mattina 5h
       '14/19',  // pomeriggio 5h
       '—',
+      ...ORARI_TURNO_BREVE,
     ]
 
     if (oreSettimanali === 36) return [
@@ -794,10 +815,11 @@ Puoi:
       '14/20', // pomeriggio 6h
       '08/16', // yuri full
       '13/16', // yuri salumeria
+      ...ORARI_TURNO_BREVE,
     ]
 
     // Default
-    return [...base, '08/14', '14/20', '08/20']
+    return [...base, '08/14', '14/20', '08/20', ...ORARI_TURNO_BREVE]
   }
 
   /** Converte l'orario scelto nel popup ("HH/HH" o "—") nel tipo turno + ora_inizio/ora_fine.
@@ -814,7 +836,12 @@ Puoi:
       return finN === 19 ? { tipo: 'pomeriggio_corto', ora_inizio, ora_fine } : { tipo: 'mattina_corta', ora_inizio, ora_fine }
     }
     if (iniN === 8 && finN === 16) return { tipo: 'yuri_full', ora_inizio, ora_fine }
-    if (iniN === 13 && finN === 16) return { tipo: 'yuri_pomeriggio', ora_inizio, ora_fine }
+    // 13/16 è il turno fisso di Yuri (yuri_pomeriggio) SOLO per lui — per chiunque altro è
+    // un turno breve eccezionale (turno_breve_13_16), stessa fascia oraria ma significato diverso.
+    if (iniN === 13 && finN === 16) return { tipo: emp?.nome === 'Yuri' ? 'yuri_pomeriggio' : 'turno_breve_13_16', ora_inizio, ora_fine }
+    if (iniN === 11 && finN === 14) return { tipo: 'turno_breve_11_14', ora_inizio, ora_fine }
+    if (iniN === 12 && finN === 15) return { tipo: 'turno_breve_12_15', ora_inizio, ora_fine }
+    if (iniN === 17 && finN === 20) return { tipo: 'turno_breve_17_20', ora_inizio, ora_fine }
     if (iniN === 8 && finN === 20) return { tipo: 'full', ora_inizio, ora_fine }
     if (finN === 20) return { tipo: 'pomeriggio', ora_inizio, ora_fine }
     return { tipo: 'mattina', ora_inizio, ora_fine }
@@ -1224,6 +1251,7 @@ Puoi:
               {!isMD && <span><strong>F</strong> = Full 9-20</span>}
               {!isMD && <span><strong>—</strong> = Riposo</span>}
               {/* MD: le celle mostrano già gli orari — nessuna voce turno in legenda, solo assenze. */}
+              {isMD && <span className="text-pink-700">11/14, 12/15, 13/16, 17/20 = Turno breve (3h)</span>}
               <span><strong className="text-yellow-700">F</strong><span className="text-yellow-700"> = Ferie</span></span>
               <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
               <span><strong className="text-yellow-700">R</strong><span className="text-yellow-700"> = Recupero</span></span>

@@ -23,8 +23,8 @@ const tools: Anthropic.Tool[] = [
         data: { type: 'string', description: 'Data in formato YYYY-MM-DD' },
         tipo: {
           type: 'string',
-          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto'],
-          description: 'Tipo di turno. yuri_full=08-16 (Lun/Mer/Ven Yuri), yuri_pomeriggio=13-16 (Mar/Gio Yuri), mattina_corta=08-13 e pomeriggio_corto=14-19 (Max, 5h)',
+          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto', 'turno_breve_11_14', 'turno_breve_12_15', 'turno_breve_13_16', 'turno_breve_17_20'],
+          description: 'Tipo di turno. yuri_full=08-16 (Lun/Mer/Ven Yuri), yuri_pomeriggio=13-16 (Mar/Gio Yuri), mattina_corta=08-13 e pomeriggio_corto=14-19 (Max, 5h). turno_breve_* = turni brevi eccezionali da 3h (11-14, 12-15, 13-16, 17-20), disponibili per chiunque su richiesta esplicita di Giacomo.',
         },
         recupero_domenicale: {
           type: 'boolean',
@@ -49,7 +49,7 @@ const tools: Anthropic.Tool[] = [
         data_fine: { type: 'string', description: 'Data fine YYYY-MM-DD' },
         tipo: {
           type: 'string',
-          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto'],
+          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto', 'turno_breve_11_14', 'turno_breve_12_15', 'turno_breve_13_16', 'turno_breve_17_20'],
         },
       },
       required: ['employee_name', 'data_inizio', 'data_fine', 'tipo'],
@@ -693,6 +693,16 @@ Orari corretti risultanti:
 - Pomeriggio 5h → 15/20
 - Pomeriggio 6h → 14/20 (solo sabato)
 Per sabato usa SEMPRE tipo "mattina" o "pomeriggio" (mai "mattina_corta"/"pomeriggio_corto", quelli sono solo per le ore ridotte nei giorni feriali) — il tool applica automaticamente le 6h corrette.
+
+TURNI BREVI (casi eccezionali):
+Disponibili per tutti i dipendenti su richiesta di Giacomo:
+- turno_breve_11_14 → 11:00-14:00 (3h)
+- turno_breve_12_15 → 12:00-15:00 (3h)
+- turno_breve_13_16 → 13:00-16:00 (3h)
+- turno_breve_17_20 → 17:00-20:00 (3h)
+Quando Giacomo dice "metti [nome] turno breve [orario]" o indica direttamente una fascia oraria di 3h (es. "11-14", "dalle 17 alle 20") → usa il tipo turno_breve corrispondente, non "mattina"/"pomeriggio".
+Es: "metti Angelica 11-14 giovedì" → tipo: turno_breve_11_14.
+Eccezione: 13-16 per Yuri resta sempre yuri_pomeriggio (il suo turno fisso), MAI turno_breve_13_16 — quella distinzione vale solo per lui.
 
 REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente):
 - Il supermercato è aperto 08:00–13:00

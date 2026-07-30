@@ -1,6 +1,7 @@
 export type TurnoTipo =
   | 'mattina' | 'pomeriggio' | 'full' | 'riposo' | 'domenica_lungo' | 'domenica_corto'
   | 'yuri_full' | 'yuri_pomeriggio' | 'mattina_corta' | 'pomeriggio_corto'
+  | 'turno_breve_11_14' | 'turno_breve_12_15' | 'turno_breve_13_16' | 'turno_breve_17_20'
 
 export const MD_LANCIANO_STORE_NOME = 'MD Lanciano'
 
@@ -76,6 +77,7 @@ export const ORE_TURNO: Record<TurnoTipo, number> = {
   domenica_lungo: 0, // non usato da Stroili
   domenica_corto: 0, // non usato da Stroili
   yuri_full: 0, yuri_pomeriggio: 0, mattina_corta: 0, pomeriggio_corto: 0, // non usati da Stroili
+  turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
 }
 
 export const ORARI_TURNO: Record<TurnoTipo, { inizio: string; fine: string } | null> = {
@@ -86,6 +88,10 @@ export const ORARI_TURNO: Record<TurnoTipo, { inizio: string; fine: string } | n
   domenica_lungo: null,
   domenica_corto: null,
   yuri_full: null, yuri_pomeriggio: null, mattina_corta: null, pomeriggio_corto: null,
+  turno_breve_11_14: { inizio: '11:00', fine: '14:00' },
+  turno_breve_12_15: { inizio: '12:00', fine: '15:00' },
+  turno_breve_13_16: { inizio: '13:00', fine: '16:00' },
+  turno_breve_17_20: { inizio: '17:00', fine: '20:00' },
 }
 
 // ── MD Lanciano — orari e ore propri (store-specific, non toccano Stroili) ──
@@ -100,6 +106,7 @@ export const ORE_TURNO_MD: Record<TurnoTipo, number> = {
   yuri_pomeriggio: 3,  // 13:00-16:00 (Mar/Gio, mattina in salumeria)
   mattina_corta: 5,    // 08:00-13:00 (Max)
   pomeriggio_corto: 5, // 14:00-19:00 (Max)
+  turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
 }
 
 export const ORARI_TURNO_MD: Record<TurnoTipo, { inizio: string; fine: string } | null> = {
@@ -113,6 +120,10 @@ export const ORARI_TURNO_MD: Record<TurnoTipo, { inizio: string; fine: string } 
   yuri_pomeriggio:  { inizio: '13:00', fine: '16:00' },
   mattina_corta:    { inizio: '08:00', fine: '13:00' },
   pomeriggio_corto: { inizio: '14:00', fine: '19:00' },
+  turno_breve_11_14: { inizio: '11:00', fine: '14:00' },
+  turno_breve_12_15: { inizio: '12:00', fine: '15:00' },
+  turno_breve_13_16: { inizio: '13:00', fine: '16:00' },
+  turno_breve_17_20: { inizio: '17:00', fine: '20:00' },
 }
 
 // Ore mensili target per contratto MD Lanciano (R6)

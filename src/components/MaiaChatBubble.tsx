@@ -21,6 +21,7 @@ interface Props {
 const TIPO_LETTER: Record<string, string> = {
   mattina: 'M', pomeriggio: 'P', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC',
   yuri_full: 'YF', yuri_pomeriggio: 'Y', mattina_corta: 'M5', pomeriggio_corto: 'P5',
+  turno_breve_11_14: '11-14', turno_breve_12_15: '12-15', turno_breve_13_16: '13-16', turno_breve_17_20: '17-20',
 }
 
 function buildContext(employees: Employee[], shifts: Shift[], giorni: { data: string }[]): string {
