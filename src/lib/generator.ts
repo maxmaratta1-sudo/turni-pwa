@@ -291,24 +291,30 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
         else if (dayOfWeek === 2 || dayOfWeek === 4) { tipo = 'yuri_pomeriggio'; orario = ORARI_TURNO_MD.yuri_pomeriggio! }
         else { tipo = 'mattina'; orario = orarioMattina(6) } // sabato
       }
-      // R3 — Alternanza Max/Romeo. Max: 5h fisse (regola propria, mattina_corta/pomeriggio_corto).
+      // R3 — Max: 5h fisse (regola propria, mattina_corta/pomeriggio_corto, alterna da solo per settimana).
+      // Romeo (28h, scarico merce): Lun/Mer/Ven SEMPRE 5h mattina 08/13 (mai toccare) — Mar/Gio 4h —
+      // Sabato = aggiustamento 28 - ore_feriali (sempre tra 5h e 6h). Nessuna alternanza con Max.
       else if (emp.alternanza_gruppo === 'AB') {
         const isMax = emp.nome === 'Max'
-        const mattinaOra = weekIsEven ? isMax : !isMax
         if (isMax) {
+          const mattinaOra = weekIsEven
           tipo = mattinaOra ? 'mattina_corta' : 'pomeriggio_corto'
           orario = ORARI_TURNO_MD[tipo]!
-        } else if (dayOfWeek === 6) {
-          // Sabato Romeo: 6h fisse (28h) — direzione di default mattina
-          tipo = mattinaOra ? 'mattina' : 'pomeriggio'
-          orario = mattinaOra ? orarioMattina(6) : orarioPomeriggio(6)
+        } else if (dayOfWeek === 1 || dayOfWeek === 3 || dayOfWeek === 5) {
+          // Lun/Mer/Ven — scarico merce, fisso 5h mattina 08:00-13:00, regola assoluta.
+          tipo = 'mattina'
+          orario = orarioMattina(5)
+        } else if (dayOfWeek === 2 || dayOfWeek === 4) {
+          // Mar/Gio — 4h mattina.
+          tipo = 'mattina'
+          orario = orarioMattina(4)
         } else {
-          const ore = getPianoGiorno(emp, settimana, weekdayIdx)
-          if (ore <= 0) { tipo = 'riposo'; orario = null }
-          else {
-            tipo = mattinaOra ? 'mattina' : 'pomeriggio'
-            orario = mattinaOra ? orarioMattina(ore) : orarioPomeriggio(ore)
-          }
+          // Sabato — aggiustamento finale: 28 - ore feriali (Lun5+Mar4+Mer5+Gio4+Ven5 = 23h) = 5h,
+          // clampato comunque tra 5h e 6h come da regola comune 28h.
+          const oreFeriali = 5 + 4 + 5 + 4 + 5
+          const oreSabato = Math.min(6, Math.max(5, emp.ore_settimanali - oreFeriali))
+          tipo = 'mattina'
+          orario = orarioMattina(oreSabato)
         }
       }
       // R2 — Carlo (35h): Mar/Gio obbligatoriamente mattina, altri giorni preferenza mattina.

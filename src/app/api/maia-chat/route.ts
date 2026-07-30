@@ -189,6 +189,72 @@ async function verificaBudgetSettimanale(
   return null
 }
 
+/** Ore reali di uno shift — usa ora_inizio/ora_fine effettivi (contratti 28h hanno ore
+ * variabili per giorno), con fallback al lookup fisso solo se i tempi non sono salvati. */
+function getOreReali(s: { tipo: string; ora_inizio?: string | null; ora_fine?: string | null }): number {
+  if (s.tipo === 'riposo') return 0
+  const reali = oreFromOrario(s.ora_inizio, s.ora_fine)
+  return reali > 0 ? reali : getOreTurno(s.tipo)
+}
+
+/** Per i 28h (Romeo/Cristina/Stefania): trova automaticamente il giorno feriale della
+ * stessa settimana da ridurre per compensare un turno domenicale appena assegnato, senza
+ * sforare le 28h contrattuali. Romeo (scarico merce) non tocca mai Lun/Mer/Ven. Ritorna
+ * solo una PROPOSTA testuale — l'applicazione avviene dopo conferma esplicita di Giacomo. */
+async function trovaBilanciamentoDomenica(
+  scheduleId: string,
+  emp: { id: string; nome: string; ore_settimanali: number },
+  domenicaData: string,
+  oreDomenica: number
+): Promise<string> {
+  const monday = getMonday(domenicaData)
+  const saturday = new Date(monday)
+  saturday.setDate(saturday.getDate() + 5)
+
+  const { data: weekShifts } = await supabaseAdmin
+    .from('shifts')
+    .select('data, tipo, ora_inizio, ora_fine')
+    .eq('employee_id', emp.id)
+    .eq('schedule_id', scheduleId)
+    .gte('data', toDateStr(monday))
+    .lte('data', toDateStr(saturday))
+
+  const oreFeriali = (weekShifts || []).reduce((sum, s) => sum + getOreReali(s), 0)
+  const eccesso = (oreFeriali + oreDomenica) - emp.ore_settimanali
+
+  if (eccesso <= 0) return 'Nessun aggiustamento necessario ✅ — la settimana resta entro le ore contrattuali.'
+
+  const isRomeo = emp.nome === 'Romeo'
+  const candidati = (weekShifts || [])
+    .filter(s => s.tipo !== 'riposo')
+    .filter(s => {
+      if (!isRomeo) return true
+      const dow = new Date(s.data + 'T00:00:00').getDay()
+      return dow !== 1 && dow !== 3 && dow !== 5 // Romeo: mai Lun/Mer/Ven (scarico merce)
+    })
+    .sort((a, b) => {
+      const aSab = new Date(a.data + 'T00:00:00').getDay() === 6
+      const bSab = new Date(b.data + 'T00:00:00').getDay() === 6
+      if (aSab && !bSab) return -1
+      if (!aSab && bSab) return 1
+      return getOreReali(b) - getOreReali(a)
+    })
+
+  for (const s of candidati) {
+    const oreGiorno = getOreReali(s)
+    const dataFormatted = new Date(s.data + 'T00:00:00').toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' })
+    if (oreGiorno === eccesso) {
+      return `Per mantenere ${emp.ore_settimanali}h esatte propongo riposo completo ${dataFormatted} (invece di ${oreGiorno}h). Confermo?`
+    }
+    const oreNuove = oreGiorno - eccesso
+    if (oreNuove >= 4) {
+      return `Per mantenere ${emp.ore_settimanali}h esatte propongo di ridurre ${dataFormatted} da ${oreGiorno}h a ${oreNuove}h. Confermo?`
+    }
+  }
+
+  return 'Non riesco a bilanciare automaticamente — chiedi a Giacomo di aggiustare manualmente.'
+}
+
 /** Gilda e Tony sono escluse definitivamente dai turni domenicali — nessuna eccezione, nemmeno via Maia. */
 function assertNonDomenicaPerEsclusi(emp: { nome: string; turno_fisso?: string | null }, tipo: string): string | null {
   if (isDomenicaTipo(tipo) && emp.turno_fisso === 'mattina') {
@@ -238,6 +304,10 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (error) return `Errore salvataggio turno: ${error.message}`
     if (isDomenicaTipo(input.tipo)) {
       const oreDomenica = input.tipo === 'domenica_lungo' ? 5 : 3
+      if (emp.ore_settimanali === 28) {
+        const proposta = await trovaBilanciamentoDomenica(ctx.scheduleId, emp, input.data, oreDomenica)
+        return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). ${proposta}`
+      }
       return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). IMPORTANTE: ora DEVI chiedere a Giacomo in quale giorno della settimana PRECEDENTE vuole che ${emp.nome} recuperi le ${oreDomenica} ore lavorate domenica — non concludere il flusso senza aver fatto questa domanda.`
     }
     return `OK: turno di ${emp.nome} il ${input.data} impostato su "${input.tipo}".`
@@ -517,6 +587,20 @@ Quando assegni 'riposo' come compensativo domenicale, NON verificare il budget o
 Il riposo RIDUCE le ore settimanali, non le aumenta. Non bloccare mai un riposo.
 Es: settimana 3-8 agosto di Romeo = 28h normali → riposo mercoledì 5 agosto (4h)
 → la settimana diventa 28 - 4 = 24h, MAI 28 + 4 = 32h.
+
+BILANCIAMENTO DOMENICA 28h:
+Quando assegni domenica a Romeo/Cristina/Stefania (28h), il tool update_shift calcola
+già in automatico se serve un aggiustamento e ti restituisce una proposta pronta.
+1. Se il risultato dice "Nessun aggiustamento necessario" → non chiedere nulla, fine flusso.
+2. Se il risultato propone di ridurre un giorno specifico o un riposo completo → riporta
+   ESATTAMENTE quella proposta a Giacomo (giorno e ore già calcolati automaticamente).
+   Romeo: il giorno proposto non è MAI Lun/Mer/Ven (scarico merce) — non serve verificarlo tu.
+3. Solo dopo che Giacomo conferma esplicitamente ("sì"/"confermo") → usa update_shift con
+   tipo "riposo" (o le ore ridotte proposte) su quella data per applicare la modifica.
+4. Conferma: "✅ [Nome] riposa/riduce [giorno] per compensare le ore domenicali."
+NON chiedere a Giacomo di scegliere tu il giorno per i 28h — il giorno è già trovato
+automaticamente dal tool. Per tutti gli altri contratti (22h/35h/36h) resta invece il
+flusso generico: chiedi tu a Giacomo quale giorno preferisce.
 
 I tool update_shift e update_shift_week verificano automaticamente il budget ore
 settimanale e rifiutano l'operazione se la sforerebbe — se ricevi un errore di questo
