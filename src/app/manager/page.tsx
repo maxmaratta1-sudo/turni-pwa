@@ -39,15 +39,15 @@ const TURNO_LABEL: Record<string, string> = {
 }
 const TURNO_COLOR: Record<string, string> = {
   mattina: 'bg-blue-100 text-blue-800',
+  mattina_corta: 'bg-cyan-100 text-cyan-800',   // Max mattina — distinto
   pomeriggio: 'bg-orange-100 text-orange-800',
+  pomeriggio_corto: 'bg-orange-100 text-orange-800', // Max pomeriggio — STESSO colore pomeriggio
   full: 'bg-green-100 text-green-800',
-  riposo: 'bg-gray-100 text-gray-400',
-  domenica_lungo: 'bg-purple-100 text-purple-800',
+  yuri_full: 'bg-indigo-200 text-indigo-900',
+  yuri_pomeriggio: 'bg-purple-100 text-purple-800',
+  domenica_lungo: 'bg-purple-200 text-purple-900',
   domenica_corto: 'bg-purple-100 text-purple-800',
-  yuri_full: 'bg-blue-900 text-blue-50',
-  yuri_pomeriggio: 'bg-sky-100 text-sky-800',
-  mattina_corta: 'bg-cyan-100 text-cyan-800',
-  pomeriggio_corto: 'bg-orange-100 text-orange-800',
+  riposo: 'bg-gray-100 text-gray-400',
 }
 // Ore lavorate per tipo turno — usato per la colonna TOT settimanale (solo MD).
 const ORE_PER_TURNO: Record<string, number> = {
@@ -528,7 +528,7 @@ Puoi:
             '10/13': [237, 233, 254],  // domenica_corto
             '8/16': [191, 219, 254],   // yuri_full
             '13/16': [191, 219, 254],  // yuri_pomeriggio
-            '14/19': [207, 250, 254],  // pomeriggio_corto (Max)
+            '14/19': [254, 237, 213],  // pomeriggio_corto (Max) — stesso colore di pomeriggio
           }
           const colorStroili: Record<string, [number, number, number]> = {
             M: [219, 234, 254], Pm: [254, 237, 213], F: [220, 252, 231], '—': [243, 244, 246],
