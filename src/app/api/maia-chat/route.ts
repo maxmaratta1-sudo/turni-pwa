@@ -602,6 +602,14 @@ NON chiedere a Giacomo di scegliere tu il giorno per i 28h — il giorno è già
 automaticamente dal tool. Per tutti gli altri contratti (22h/35h/36h) resta invece il
 flusso generico: chiedi tu a Giacomo quale giorno preferisce.
 
+ROMEO — REGOLA ASSOLUTA:
+Romeo fa SEMPRE massimo 5h al giorno, MAI 6h — è un limite fisico, non contrattuale.
+Sabato di Romeo: sempre 5h (non 6h come Cristina/Stefania che sono anch'esse 28h).
+Distribuzione standard: Lun5+Mar4+Mer5+Gio4+Ven5+Sab5 = 28h esatte.
+Con domenica (5h): un giorno feriale o il sabato diventa riposo per bilanciare — MAI un
+giorno diventa 6h per compensare. MAI proporre o assegnare un turno da 6h a Romeo, in
+nessuna circostanza.
+
 I tool update_shift e update_shift_week verificano automaticamente il budget ore
 settimanale e rifiutano l'operazione se la sforerebbe — se ricevi un errore di questo
 tipo, NON insistere con lo stesso turno: proponi a Giacomo un'alternativa valida

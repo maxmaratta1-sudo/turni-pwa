@@ -146,6 +146,20 @@ const CONFIG_ORE_CONTRATTO: Record<number, { sabato: number; min: number; max: n
 // Lun5/Mar4/Mer5/Gio4/Ven4 = 22h feriali + Sab6 = 28h esatte (mattina Lun/Mer/Ven, pomeriggio Mar/Gio).
 const ORE_28H_FERIALI: Record<number, number> = { 1: 5, 2: 4, 3: 5, 4: 4, 5: 4 }
 
+/** Limite fisico di ore massime in un singolo giorno per dipendente — Romeo e Max hanno
+ * un tetto di 5h anche se il loro contratto (28h/30h) userebbe altrimenti giornate più
+ * lunghe per altri dipendenti con le stesse ore settimanali. */
+function getMaxOreGiorno(emp: Employee): number {
+  if (emp.nome === 'Romeo') return 5 // limite fisico assoluto, mai 6h nemmeno sabato
+  if (emp.nome === 'Max') return 5
+  if (emp.ore_settimanali === 22) return 5
+  if (emp.ore_settimanali === 28) return 6 // Cristina/Stefania
+  if (emp.ore_settimanali === 30) return 5
+  if (emp.ore_settimanali === 35) return 6
+  if (emp.ore_settimanali === 36) return 6
+  return 6
+}
+
 /** Distribuisce ore intere su N giorni, rispettando min/max giornaliero. */
 function distribuisciOre(oreRimanenti: number, giorni: number, min: number, max: number): number[] {
   const result: number[] = []
@@ -309,10 +323,10 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
           tipo = 'mattina'
           orario = orarioMattina(4)
         } else {
-          // Sabato — aggiustamento finale: 28 - ore feriali (Lun5+Mar4+Mer5+Gio4+Ven5 = 23h) = 5h,
-          // clampato comunque tra 5h e 6h come da regola comune 28h.
+          // Sabato — aggiustamento finale: 28 - ore feriali (Lun5+Mar4+Mer5+Gio4+Ven5 = 23h) = 5h.
+          // Clampato tra 5h e getMaxOreGiorno(emp) — per Romeo il tetto è SEMPRE 5h, mai 6h.
           const oreFeriali = 5 + 4 + 5 + 4 + 5
-          const oreSabato = Math.min(6, Math.max(5, emp.ore_settimanali - oreFeriali))
+          const oreSabato = Math.min(getMaxOreGiorno(emp), Math.max(5, emp.ore_settimanali - oreFeriali))
           tipo = 'mattina'
           orario = orarioMattina(oreSabato)
         }
