@@ -86,6 +86,14 @@ export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, e
     await sendText(input.trim())
   }
 
+  function aggiornaContesto() {
+    // Ricarica shifts/unavailabilities dal DB (già gestito da manager/page.tsx sull'evento
+    // esistente) — la prossima domanda a Maia userà automaticamente i dati freschi, dato
+    // che buildContext legge sempre lo stato `shifts` corrente al momento dell'invio.
+    window.dispatchEvent(new CustomEvent('maiaShiftUpdated'))
+    setMessages(prev => [...prev, { role: 'assistant', content: '🔄 Contesto aggiornato — ho i turni più recenti della settimana.' }])
+  }
+
   // Messaggi automatici inviati dall'esterno (es. bottone "Controlla turni" nel manager)
   useEffect(() => {
     if (!isMD) return
@@ -115,7 +123,12 @@ export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, e
           style={{ width: 380, height: 500, maxWidth: 'calc(100vw - 2.5rem)', maxHeight: 'calc(100vh - 7rem)' }}>
           <div className="flex items-center justify-between px-4 py-3 border-b bg-purple-600 rounded-t-2xl">
             <h3 className="text-white font-semibold text-sm">✨ Maia — Turni Manager</h3>
-            <button onClick={() => setOpen(false)} className="text-white/80 hover:text-white text-lg">✕</button>
+            <div className="flex items-center gap-1">
+              <button onClick={aggiornaContesto} className="text-white/70 hover:text-white text-sm px-2" title="Aggiorna turni">
+                🔄
+              </button>
+              <button onClick={() => setOpen(false)} className="text-white/80 hover:text-white text-lg">✕</button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 space-y-2 text-sm">

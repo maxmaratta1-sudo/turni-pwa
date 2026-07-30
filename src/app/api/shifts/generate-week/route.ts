@@ -41,16 +41,20 @@ export async function POST(req: NextRequest) {
       .lte('data', week_end)
     if (unavailErr) console.error('[shifts/generate-week] unavailabilities fetch error:', JSON.stringify(unavailErr, null, 2))
 
-    // Elimina turni esistenti Lun-Sab di questa settimana (la domenica NON viene toccata).
-    const { error: deleteErr } = await supabaseAdmin
+    // Turni Lun-Sab già esistenti in questa settimana: NON li tocchiamo (potrebbero essere
+    // stati assegnati/modificati manualmente da Giacomo o da Maia) — generiamo solo per gli
+    // slot dipendente/giorno ancora vuoti.
+    const { data: turniEsistenti, error: esistentiErr } = await supabaseAdmin
       .from('shifts')
-      .delete()
+      .select('employee_id, data')
       .eq('schedule_id', schedule_id)
       .gte('data', week_start)
       .lte('data', week_end)
-    if (deleteErr) console.error('[shifts/generate-week] delete error:', JSON.stringify(deleteErr, null, 2))
+    if (esistentiErr) console.error('[shifts/generate-week] turni esistenti fetch error:', JSON.stringify(esistentiErr, null, 2))
 
-    const shifts = generateShiftsMDWeek({
+    const turniManuale = new Set((turniEsistenti || []).map(t => `${t.employee_id}_${t.data}`))
+
+    const shiftsGenerati = generateShiftsMDWeek({
       scheduleId: schedule_id,
       employees: employees || [],
       unavailabilities: unavailabilities || [],
@@ -59,7 +63,10 @@ export async function POST(req: NextRequest) {
       weekEnd: week_end,
     })
 
-    console.log('[shifts/generate-week] settimana:', week_start, '→', week_end, '| shifts da inserire:', shifts.length)
+    const shifts = shiftsGenerati.filter(s => !turniManuale.has(`${s.employee_id}_${s.data}`))
+    const saltatiPerEsistenti = shiftsGenerati.length - shifts.length
+
+    console.log('[shifts/generate-week] settimana:', week_start, '→', week_end, '| shifts da inserire:', shifts.length, '| saltati (già assegnati):', saltatiPerEsistenti)
 
     const { error } = await supabaseAdmin.from('shifts').insert(shifts)
     if (error) {
@@ -67,7 +74,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: error.message, details: error.details, hint: error.hint, code: error.code }, { status: 500 })
     }
 
-    return NextResponse.json({ ok: true, shifts_generated: shifts.length })
+    return NextResponse.json({ ok: true, shifts_generated: shifts.length, shifts_preservati: saltatiPerEsistenti })
   } catch (error) {
     console.error('SHIFTS GENERATE-WEEK ERROR:', JSON.stringify(error, null, 2))
     return NextResponse.json({ error: String(error) }, { status: 500 })

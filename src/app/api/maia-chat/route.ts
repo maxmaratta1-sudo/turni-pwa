@@ -595,7 +595,7 @@ export async function POST(req: NextRequest) {
   let alternanzaContext = ''
   if (storeId && settimana_inizio) {
     const alternanza = await chiMattina(storeId, settimana_inizio)
-    alternanzaContext = `\n\n🔄 ALTERNANZA MAX/ROMEO QUESTA SETTIMANA (calcolato automaticamente — NON chiedere a Giacomo):\n- ${alternanza.mattina}: fa MATTINA questa settimana\n- ${alternanza.pomeriggio}: fa POMERIGGIO questa settimana\nUsa il tool set_alternanza SOLO se Giacomo chiede esplicitamente di cambiare chi fa mattina.`
+    alternanzaContext = `\n\n⚠️ ALTERNANZA MAX/ROMEO QUESTA SETTIMANA — REGOLA ASSOLUTA:\n- ${alternanza.mattina} fa ESCLUSIVAMENTE MATTINA questa settimana\n- ${alternanza.pomeriggio} fa ESCLUSIVAMENTE POMERIGGIO questa settimana\nNON è possibile metterli entrambi di mattina o entrambi di pomeriggio.\nNON chiedere conferma — è automatico. Usa il tool set_alternanza SOLO se Giacomo chiede esplicitamente di cambiare chi fa mattina.`
   }
   const settimanaContext = settimana_inizio && settimana_fine
     ? `\n\n📅 MODALITÀ SETTIMANA ATTIVA: Giacomo sta lavorando specificamente sulla settimana ${settimana_inizio} — ${settimana_fine}. Concentra le tue risposte e le tue azioni SOLO su questa settimana, salvo richiesta esplicita diversa. Il bilanciamento domenica usa comunque sempre solo i turni della settimana pertinente (calcolato automaticamente dal tool), non serve fare calcoli mensili.${alternanzaContext}`
@@ -670,6 +670,12 @@ REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
 2. Yuri: Lun/Mer/Ven 08-16 in sala (turno yuri_full); Mar/Gio 13-16 in sala (turno yuri_pomeriggio, mattina in salumeria); Sab 08-14; Dom riposo
 3. Carlo: Mar e Gio obbligatoriamente mattina; altri giorni preferenza mattina, pomeriggio solo se serve bilanciare le ore
 4. Max: sempre 5h — mattina_corta 08-13 o pomeriggio_corto 14-19; alterna con Romeo a settimane alterne (turni standard da 6h per Romeo). Chi tocca mattina/pomeriggio questa settimana è già calcolato automaticamente (vedi sezione ALTERNANZA sopra, se presente) — NON chiedere a Giacomo chi tocca, usa quel dato. Cambialo solo se Giacomo lo chiede esplicitamente (tool set_alternanza).
+
+MAX E ROMEO — ALTERNANZA SETTIMANALE ASSOLUTA:
+Ogni settimana uno fa mattina e l'altro pomeriggio — MAI entrambi uguale.
+Il calcolo è automatico da database — non chiedere mai a Giacomo.
+Se il contesto dice "Romeo mattina" → Max DEVE fare pomeriggio, senza eccezioni.
+Se il contesto dice "Max mattina" → Romeo DEVE fare pomeriggio, senza eccezioni.
 5. Cassiere 22h (Marilena, Angelica, Elisa, Damiana): 2 di mattina + 2 di pomeriggio ogni giorno
 6. Fascia 13-16: sempre Yuri presente + minimo 1 altro cassiere
 7. Chiusura 20:00: minimo 3 persone (sabato 4)
