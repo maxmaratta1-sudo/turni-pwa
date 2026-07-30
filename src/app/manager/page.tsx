@@ -982,7 +982,11 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
                 <tr className="border-b">
                   <th className="text-left p-3 font-semibold text-gray-700 sticky left-0 bg-white min-w-32">Dipendente</th>
                   {Array.from({ length: offsetLunedi }).map((_, i) => (
-                    <th key={`empty-h-${i}`} className={`p-2 ${isMD ? 'min-w-14' : 'min-w-10'} bg-gray-50 border-b`} />
+                    <th key={`empty-h-${i}`} className={`p-2 text-center ${isMD ? 'min-w-14' : 'min-w-10'} bg-gray-50 border-b`}>
+                      <div className={`text-xs ${i >= 5 ? 'text-red-300' : 'text-gray-300'}`}>
+                        {['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'][i]}
+                      </div>
+                    </th>
                   ))}
                   {giorniOrdinati.map(g => (
                     <Fragment key={g.data}>
