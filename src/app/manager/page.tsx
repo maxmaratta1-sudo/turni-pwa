@@ -171,11 +171,14 @@ export default function ManagerPage() {
   const [loadingStorico, setLoadingStorico] = useState(false)
   const [ferieSaldi, setFerieSaldi] = useState<Record<string, FerieSaldo>>({})
   const [popupCell, setPopupCell] = useState<{ empId: string; data: string; x: number; y: number } | null>(null)
+  const [showChiusure, setShowChiusure] = useState(false)
+  const [settimanaChiusure, setSettimanaChiusure] = useState(0)
 
   const giorni = getDays(anno, mese)
-  // Tabella: parte sempre da Lunedì — i giorni "orfani" prima del primo Lunedì del mese
-  // (es. Sab 1 / Dom 2 di Agosto 2026) vengono spostati in fondo invece che in testa.
-  const giorniOrdinati = reorderGiorniLunFirst(giorni)
+  // Regola assoluta: i giorni del mese vanno sempre in ordine cronologico 1→31,
+  // mai riordinati per settimana ISO (la colonna TOT si inserisce dopo ogni domenica,
+  // ma l'ordine dei giorni non cambia mai).
+  const giorniOrdinati = giorni
   const isMD = storeNome === MD_LANCIANO_STORE_NOME
 
   useEffect(() => {
@@ -828,6 +831,12 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
                   🔍 Controlla turni
                 </button>
               )}
+              {isMD && shifts.length > 0 && (
+                <button onClick={() => { setSettimanaChiusure(0); setShowChiusure(true) }}
+                  className="bg-slate-700 text-white px-4 py-2 rounded hover:bg-slate-800 flex items-center gap-2">
+                  🔒 Chiusure
+                </button>
+              )}
               {shifts.length > 0 && (
                 <button onClick={resetMese} className="bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded hover:bg-red-100">
                   🗑️ Reset mese
@@ -1106,6 +1115,69 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
           )
         })()}
 
+        {/* Pannello laterale "Chiusure" — copertura chiusura 20:00 per settimana (Lun-Sab) */}
+        {showChiusure && isMD && (() => {
+          const settimane = getSettimaneLunDom(giorni, mese)
+          const idx = Math.min(Math.max(settimanaChiusure, 0), Math.max(settimane.length - 1, 0))
+          const settimana = settimane[idx]
+          const giorniLavorativi = settimana ? settimana.giorni.filter(g => !g.domenica) : []
+
+          return (
+            <>
+              <div className="fixed inset-0 bg-black/20 z-40" onClick={() => setShowChiusure(false)} />
+              <div className="fixed top-0 right-0 h-full bg-white shadow-2xl z-50 flex flex-col" style={{ width: 320 }}>
+                <div className="flex items-center justify-between px-4 py-3 border-b bg-slate-700">
+                  <h3 className="text-white font-semibold text-sm">🔒 Chiusure — {MESI[mese - 1]} {anno}</h3>
+                  <button onClick={() => setShowChiusure(false)} className="text-white/80 hover:text-white text-lg">✕</button>
+                </div>
+
+                <div className="flex items-center justify-between px-4 py-2 border-b bg-gray-50">
+                  <button onClick={() => setSettimanaChiusure(i => Math.max(0, i - 1))} disabled={idx === 0}
+                    className="px-2 py-1 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">←</button>
+                  <span className="text-xs text-gray-500">{settimana?.label ?? '—'}</span>
+                  <button onClick={() => setSettimanaChiusure(i => Math.min(settimane.length - 1, i + 1))} disabled={idx >= settimane.length - 1}
+                    className="px-2 py-1 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">→</button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                  {giorniLavorativi.map(g => {
+                    const isSabato = g.giorno === 'Sab'
+                    const minRichiesto = isSabato ? 4 : 3
+                    const chiusuristi = employees
+                      .map(emp => ({ emp, shift: getShift(emp.id, g.data) }))
+                      .filter(({ shift }) => shift?.ora_fine === '20:00')
+                    const ok = chiusuristi.length >= minRichiesto
+
+                    return (
+                      <div key={g.data} className={`rounded-lg border p-3 ${ok ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
+                        <div className="text-sm font-semibold text-gray-800 mb-1">{g.giorno === 'Sab' ? 'Sabato' : ['Lun','Mar','Mer','Gio','Ven'].includes(g.giorno) ? { Lun: 'Lunedì', Mar: 'Martedì', Mer: 'Mercoledì', Gio: 'Giovedì', Ven: 'Venerdì' }[g.giorno] : g.giorno} {g.num} {MESI[mese - 1]}</div>
+                        {ok ? (
+                          <div className="text-sm text-green-700">
+                            ✅ {chiusuristi.map(({ emp, shift }) => `${emp.nome} ${formatOraShort(shift?.ora_inizio)}/20`).join(' · ')}
+                            <span className="text-xs text-green-600"> ({chiusuristi.length} person{chiusuristi.length === 1 ? 'a' : 'e'})</span>
+                          </div>
+                        ) : (
+                          <div>
+                            <div className="text-sm text-red-700 font-medium">⚠️ Solo {chiusuristi.length} person{chiusuristi.length === 1 ? 'a' : 'e'} — manca copertura!</div>
+                            {chiusuristi.length > 0 && (
+                              <div className="text-sm text-red-600 mt-1">
+                                {chiusuristi.map(({ emp, shift }) => `${emp.nome} ${formatOraShort(shift?.ora_inizio)}/20`).join(' · ')}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                  {giorniLavorativi.length === 0 && (
+                    <p className="text-sm text-gray-400">Nessun giorno lavorativo in questa settimana.</p>
+                  )}
+                </div>
+              </div>
+            </>
+          )
+        })()}
+
         {/* Pannello permessi mensili */}
         {Object.keys(unavByEmployee).length > 0 && (
           <div className="bg-white rounded-xl shadow-sm p-4">
@@ -1305,15 +1377,6 @@ function getDays(anno: number, mese: number) {
     d.setDate(d.getDate() + 1)
   }
   return days
-}
-
-/** Riordina i giorni del mese in modo che il primo Lunedì venga per primo — i giorni
- * "orfani" prima del primo Lunedì (es. Sab 1 / Dom 2 se il mese inizia di Sabato)
- * vengono spostati in fondo invece che restare in testa alla tabella. */
-function reorderGiorniLunFirst(giorni: ReturnType<typeof getDays>): ReturnType<typeof getDays> {
-  const firstMondayIdx = giorni.findIndex(g => new Date(g.data + 'T00:00:00').getDay() === 1)
-  if (firstMondayIdx <= 0) return giorni
-  return [...giorni.slice(firstMondayIdx), ...giorni.slice(0, firstMondayIdx)]
 }
 
 /** Settimane reali Lun-Dom del mese (per il PDF settimanale) — sempre a partire dal

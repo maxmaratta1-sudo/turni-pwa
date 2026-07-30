@@ -25,10 +25,20 @@ export default function DipendenteePage() {
   const [tipoAssenza, setTipoAssenza] = useState('P')
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [conflitti, setConflitti] = useState<Record<string, string[]>>({})
+  const [ultimoGiornoToccato, setUltimoGiornoToccato] = useState<string | null>(null)
 
   useEffect(() => {
     if (token) loadData()
   }, [token])
+
+  useEffect(() => {
+    if (!employee || !resolvedScheduleId) return
+    fetch(`/api/unavailabilities/conflitti?schedule_id=${resolvedScheduleId}&ore_settimanali=${employee.ore_settimanali}&employee_id=${employee.id}`)
+      .then(r => r.json())
+      .then(data => setConflitti(data.conflitti || {}))
+      .catch(() => {})
+  }, [employee, resolvedScheduleId])
 
   async function loadData() {
     const res = await fetch(`/api/unavailabilities?token=${token}&schedule_id=${scheduleIdParam ?? ''}`)
@@ -85,7 +95,12 @@ export default function DipendenteePage() {
     else next.add(data)
     setSelectedDates(next)
     setSaved(false)
+    setUltimoGiornoToccato(data)
   }
+
+  const giornoConConflitto = ultimoGiornoToccato && selectedDates.has(ultimoGiornoToccato) && conflitti[ultimoGiornoToccato]?.length
+    ? ultimoGiornoToccato
+    : null
 
   async function salva() {
     if (!resolvedScheduleId) return
@@ -134,8 +149,19 @@ export default function DipendenteePage() {
           <div className="grid grid-cols-7 gap-1 text-center text-xs text-gray-400 mb-2">
             {['L','M','M','G','V','S','D'].map((d,i) => <div key={i}>{d}</div>)}
           </div>
-          <CalGrid giorni={giorni} selected={selectedDates} onToggle={toggleDate} />
+          <CalGrid giorni={giorni} selected={selectedDates} onToggle={toggleDate} conflitti={conflitti} />
         </div>
+
+        {giornoConConflitto && (
+          <div className="bg-orange-50 border border-orange-200 rounded-xl p-4 mb-4">
+            <p className="text-orange-800 font-semibold text-sm">
+              ⚠️ Attenzione — {conflitti[giornoConConflitto]?.join(', ')} {conflitti[giornoConConflitto]?.length === 1 ? 'ha' : 'hanno'} già richiesto questo giorno.
+            </p>
+            <p className="text-orange-600 text-xs mt-1">
+              Puoi comunque inviare la tua richiesta. Sarà Giacomo a decidere come organizzare i turni.
+            </p>
+          </div>
+        )}
 
         {selectedDates.size > 0 && (
           <div className="bg-white rounded-2xl shadow-sm p-4 mb-4">
@@ -173,10 +199,11 @@ export default function DipendenteePage() {
   )
 }
 
-function CalGrid({ giorni, selected, onToggle }: {
+function CalGrid({ giorni, selected, onToggle, conflitti }: {
   giorni: ReturnType<typeof getDays>,
   selected: Set<string>,
-  onToggle: (d: string) => void
+  onToggle: (d: string) => void,
+  conflitti?: Record<string, string[]>
 }) {
   if (!giorni.length) return null
   // Fix timezone: parse come data locale aggiungendo T00:00:00
@@ -186,16 +213,25 @@ function CalGrid({ giorni, selected, onToggle }: {
   return (
     <div className="grid grid-cols-7 gap-1">
       {Array(offset).fill(null).map((_, i) => <div key={`e${i}`} />)}
-      {giorni.map(g => (
-        <button key={g.data} onClick={() => !g.domenica && onToggle(g.data)}
-          disabled={g.domenica}
-          className={`aspect-square rounded-lg text-sm font-medium transition flex items-center justify-center
-            ${g.domenica ? 'text-gray-300 cursor-not-allowed' :
-              selected.has(g.data) ? 'bg-red-500 text-white' :
-              'hover:bg-gray-100 text-gray-700'}`}>
-          {g.num}
-        </button>
-      ))}
+      {giorni.map(g => {
+        const haConflitto = !!conflitti?.[g.data]?.length
+        const isSelected = selected.has(g.data)
+        return (
+          <button key={g.data} onClick={() => !g.domenica && onToggle(g.data)}
+            disabled={g.domenica}
+            title={haConflitto ? `${conflitti![g.data].join(', ')} ${conflitti![g.data].length === 1 ? 'ha' : 'hanno'} già richiesto questo giorno` : undefined}
+            className={`relative aspect-square rounded-lg text-sm font-medium transition flex items-center justify-center
+              ${g.domenica ? 'text-gray-300 cursor-not-allowed' :
+                isSelected && haConflitto ? 'bg-orange-500 text-white' :
+                isSelected ? 'bg-red-500 text-white' :
+                'hover:bg-gray-100 text-gray-700'}`}>
+            {g.num}
+            {!isSelected && haConflitto && (
+              <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-orange-500" />
+            )}
+          </button>
+        )
+      })}
     </div>
   )
 }
