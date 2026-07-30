@@ -221,7 +221,7 @@ async function verificaBudgetSettimanale(
 
   const { data: weekShifts } = await supabaseAdmin
     .from('shifts')
-    .select('data, tipo')
+    .select('data, tipo, ora_inizio, ora_fine')
     .eq('employee_id', employeeId)
     .eq('schedule_id', scheduleId)
     .gte('data', toDateStr(monday))
@@ -229,11 +229,19 @@ async function verificaBudgetSettimanale(
 
   const isFeriale = (d: string) => new Date(d + 'T00:00:00').getDay() !== 0 // 0 = domenica
 
+  // Ore REALI (ora_inizio/ora_fine), non il lookup fisso per tipo — con contratti a ore
+  // variabili (22h/28h/Romeo) il lookup fisso (es. "mattina"=6h) è quasi sempre sbagliato
+  // rispetto alle ore effettivamente salvate per quel giorno (es. 4h), gonfiando il totale
+  // e bloccando assegnazioni che in realtà rientrano nel contratto.
   const oreEsistenti = (weekShifts || [])
     .filter(s => s.data !== data)
     .filter(s => isFeriale(s.data) && !isDomenicaTipo(s.tipo))
-    .reduce((sum, s) => sum + getOreTurno(s.tipo), 0)
-  const oreDopoModifica = oreEsistenti + (oreOverride ?? getOreTurno(tipo))
+    .reduce((sum, s) => sum + getOreReali(s), 0)
+  // oreOverride è valido SOLO per tipo mattina/pomeriggio (coerente con upsertShift, che lo
+  // ignora per qualunque altro tipo) — altrimenti un "ore" fuori posto nel messaggio di Giacomo
+  // farebbe calcolare ore sbagliate per turni con orario fisso (yuri_*, turno_breve_*, ecc.).
+  const oreOverrideValido = (tipo === 'mattina' || tipo === 'pomeriggio') ? oreOverride : undefined
+  const oreDopoModifica = oreEsistenti + (oreOverrideValido ?? getOreTurno(tipo))
 
   if (oreDopoModifica > oreSettimanali) {
     return `Errore: impossibile assegnare "${tipo}" a ${nome} il ${data} — avrebbe ${oreDopoModifica}h questa settimana (contratto: ${oreSettimanali}h). Proponi un'alternativa con meno ore o un altro giorno.`
