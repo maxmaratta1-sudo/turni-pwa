@@ -188,20 +188,28 @@ function orarioPomeriggio(ore: number): { inizio: string; fine: string } {
   return { inizio: formatOra(20 - ore), fine: '20:00' }
 }
 
-// Cassiere 22h: 2 gruppi fissi (mattina/pomeriggio), invertiti a settimane alterne —
-// garantisce SEMPRE 2 di mattina + 2 di pomeriggio ogni giorno, mai tutte sullo stesso turno.
-const CASSIERE22_GRUPPO_A = ['Angelica', 'Elisa']       // mattina quando la settimana è pari
-const CASSIERE22_GRUPPO_B = ['Damiana', 'Marilena']     // pomeriggio quando la settimana è pari
+// Cassiere 22h: rotazione GIORNALIERA (non a coppie settimanali fisse) — 3 pattern che
+// si alternano giorno per giorno del mese, garantendo SEMPRE 2 mattina + 2 pomeriggio
+// tra le 4, con coppie diverse per varietà invece di restare fisse tutta la settimana.
+const CASSIERE_22H = ['Angelica', 'Damiana', 'Elisa', 'Marilena']
+const PATTERN_COPPIE_22H: { mattina: string[]; pomeriggio: string[] }[] = [
+  { mattina: ['Angelica', 'Elisa'], pomeriggio: ['Damiana', 'Marilena'] },
+  { mattina: ['Damiana', 'Elisa'], pomeriggio: ['Angelica', 'Marilena'] },
+  { mattina: ['Angelica', 'Marilena'], pomeriggio: ['Damiana', 'Elisa'] },
+]
 
-function isMattinaCassiere22(nome: string, weekIsEven: boolean): boolean {
-  const inGruppoA = CASSIERE22_GRUPPO_A.includes(nome)
-  return weekIsEven ? inGruppoA : !inGruppoA
+/** Direzione mattina/pomeriggio per le 4 cassiere 22h — ruota ogni giorno del mese
+ * (giorno 1→pattern 0, giorno 2→pattern 1, giorno 3→pattern 2, giorno 4→pattern 0...). */
+function isMattinaCassiere22Giornaliero(nome: string, dataStr: string): boolean {
+  const giorno = parseInt(dataStr.split('-')[2], 10)
+  const pattern = PATTERN_COPPIE_22H[(giorno - 1) % 3]
+  return pattern.mattina.includes(nome)
 }
 
-// Alternanza sabati (settimane pari/dispari) — Carlo e il "gruppo 2" alternano
-// mattina/pomeriggio del sabato invece di avere una direzione fissa. Yuri resta
-// SEMPRE mattina 08-14 di sabato (regola propria, non tocca questa alternanza).
-const ALTERNANZA_SABATO_GRUPPO2 = ['Angelica', 'Damiana', 'Elisa', 'Marilena', 'Cristina', 'Stefania']
+// Alternanza sabati (settimane pari/dispari) — SOLO Cristina/Stefania (28h), che hanno
+// una direzione settimanale fissa. Le cassiere 22h usano invece la rotazione giornaliera
+// sopra anche di sabato (vedi isMattinaCassiere22Giornaliero).
+const ALTERNANZA_SABATO_GRUPPO2 = ['Cristina', 'Stefania']
 
 /** Direzione sabato per il "gruppo 2": metà del gruppo mattina, metà pomeriggio,
  * si invertono a settimane alterne (weekIsEven). */
@@ -343,15 +351,15 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
           else { tipo = 'mattina'; orario = orarioMattina(ore) } // sempre preferenza mattina
         }
       }
-      // R4 — Cassiere 22h: rotazione a coppie mattina/pomeriggio, ore variabili da distribuzione.
-      // Mattina = orario flessibile end-anchored a 13:00 (vedi orarioMattinaFlessibile).
+      // R4 — Cassiere 22h: rotazione GIORNALIERA a coppie mattina/pomeriggio (mai fissa
+      // per tutta la settimana), ore variabili da distribuzione. Mattina = orario
+      // flessibile end-anchored a 13:00 (vedi orarioMattinaFlessibile).
       else if (emp.priorita_cassa === 1) {
-        const mattinaOra = isMattinaCassiere22(emp.nome, weekIsEven)
+        const mattinaOra = isMattinaCassiere22Giornaliero(emp.nome, dataStr)
         if (dayOfWeek === 6) {
-          // Sabato: sempre 5h, direzione alternata a settimane alterne (gruppo 2).
-          const mattinaSabato = direzioneSabatoGruppo2(emp.nome, weekIsEven)
-          tipo = mattinaSabato ? 'mattina' : 'pomeriggio'
-          orario = mattinaSabato ? { inizio: '08:00', fine: '13:00' } : orarioPomeriggio(5)
+          // Sabato: sempre 5h, stessa rotazione giornaliera delle cassiere.
+          tipo = mattinaOra ? 'mattina' : 'pomeriggio'
+          orario = mattinaOra ? { inizio: '08:00', fine: '13:00' } : orarioPomeriggio(5)
         } else {
           const ore = getPianoGiorno(emp, settimana, weekdayIdx)
           if (ore <= 0) { tipo = 'riposo'; orario = null }

@@ -201,7 +201,17 @@ function getOreReali(s: { tipo: string; ora_inizio?: string | null; ora_fine?: s
   return reali > 0 ? reali : getOreTurno(s.tipo)
 }
 
-/** Per i 28h (Romeo/Cristina/Stefania): trova automaticamente il giorno feriale della
+/** Ore minime giornaliere per contratto — usate come pavimento quando si riduce un
+ * giorno per bilanciare la domenica (mai scendere sotto il minimo, salvo riposo pieno). */
+function minGiornoPerContratto(oreSettimanali: number): number {
+  if (oreSettimanali === 22) return 3
+  if (oreSettimanali === 28) return 4
+  if (oreSettimanali === 35) return 5
+  if (oreSettimanali === 36) return 6
+  return 4
+}
+
+/** Per i 28h (Romeo/Cristina/Stefania) e le cassiere 22h: trova automaticamente il giorno feriale della
  * stessa settimana da ridurre per compensare un turno domenicale appena assegnato, senza
  * sforare le 28h contrattuali. Romeo (scarico merce) non tocca mai Lun/Mer/Ven. Ritorna
  * solo una PROPOSTA testuale — l'applicazione avviene dopo conferma esplicita di Giacomo. */
@@ -260,7 +270,7 @@ async function trovaBilanciamentoDomenica(
       return `Per mantenere ${emp.ore_settimanali}h esatte propongo riposo completo ${dataFormatted} (invece di ${oreGiorno}h). Confermo?`
     }
     const oreNuove = oreGiorno - eccesso
-    if (oreNuove >= 4) {
+    if (oreNuove >= minGiornoPerContratto(emp.ore_settimanali)) {
       return `Per mantenere ${emp.ore_settimanali}h esatte propongo di ridurre ${dataFormatted} da ${oreGiorno}h a ${oreNuove}h. Confermo?`
     }
   }
@@ -317,7 +327,7 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (error) return `Errore salvataggio turno: ${error.message}`
     if (isDomenicaTipo(input.tipo)) {
       const oreDomenica = input.tipo === 'domenica_lungo' ? 5 : 3
-      if (emp.ore_settimanali === 28) {
+      if (emp.ore_settimanali === 28 || emp.ore_settimanali === 22) {
         const proposta = await trovaBilanciamentoDomenica(ctx.scheduleId, emp, input.data, oreDomenica)
         return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). ${proposta}`
       }
@@ -621,9 +631,11 @@ Il riposo RIDUCE le ore settimanali, non le aumenta. Non bloccare mai un riposo.
 Es: settimana 3-8 agosto di Romeo = 28h normali → riposo mercoledì 5 agosto (5h, Lun/Mer/Ven)
 → la settimana diventa 28 - 5 = 23h feriali + 5h domenica = 28h esatte, MAI 28 + 5 = 33h.
 
-BILANCIAMENTO DOMENICA 28h:
-Quando assegni domenica a Romeo/Cristina/Stefania (28h), il tool update_shift calcola
-già in automatico se serve un aggiustamento e ti restituisce una proposta pronta.
+BILANCIAMENTO DOMENICA 22h/28h:
+Quando assegni domenica a una cassiera 22h (Angelica/Damiana/Elisa/Marilena) o a un 28h
+(Romeo/Cristina/Stefania), il tool update_shift calcola già in automatico se serve un
+aggiustamento e ti restituisce una proposta pronta, basata sulle ore REALI già assegnate
+quella settimana (non ore generiche per contratto).
 1. Se il risultato dice "Nessun aggiustamento necessario" → non chiedere nulla, fine flusso.
 2. Se il risultato propone di ridurre un giorno specifico o un riposo completo → riporta
    ESATTAMENTE quella proposta a Giacomo (giorno/i e ore già calcolati automaticamente).
@@ -632,8 +644,8 @@ già in automatico se serve un aggiustamento e ti restituisce una proposta pront
    tipo "riposo" E recupero_domenicale:true (o le ore ridotte proposte, senza il flag se
    non è un riposo completo) su quella data per applicare la modifica.
 4. Conferma: "✅ [Nome] riposa/riduce [giorno] per compensare le ore domenicali."
-NON chiedere a Giacomo di scegliere tu il giorno per i 28h — il giorno è già trovato
-automaticamente dal tool. Per tutti gli altri contratti (22h/35h/36h) resta invece il
+NON chiedere a Giacomo di scegliere tu il giorno per 22h/28h — il giorno è già trovato
+automaticamente dal tool. Per tutti gli altri contratti (35h/36h) resta invece il
 flusso generico: chiedi tu a Giacomo quale giorno preferisce.
 
 ROMEO — REGOLA ASSOLUTA (ORE GIORNALIERE):
