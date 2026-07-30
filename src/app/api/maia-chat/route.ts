@@ -149,20 +149,19 @@ function getOreTurno(tipo: string): number {
   return orario ? oreFromOrario(orario.inizio, orario.fine) : 0
 }
 
-/** Verifica che, applicando `tipo` a `data` per `employeeId`, il totale ore della
- * settimana (Lun-Dom) non superi le ore contrattuali. Ritorna un messaggio d'errore
- * se sfora, altrimenti null. */
 const isDomenicaTipo = (tipo: string) => tipo === 'domenica_lungo' || tipo === 'domenica_corto'
 
 /** Verifica che, applicando `tipo` a `data` per `employeeId`, il totale ore della
  * settimana (Lun-Ven+Sab, esclusa domenica) non superi le ore contrattuali. La domenica
  * è sempre extra — compensata dal riposo nella settimana precedente, non conta mai nel
- * budget settimanale e non viene mai bloccata per eccesso ore. Ritorna un messaggio
- * d'errore se sfora, altrimenti null. */
+ * budget settimanale e non viene mai bloccata per eccesso ore. Il 'riposo' (anche quello
+ * compensativo domenicale) RIDUCE sempre le ore — non va mai bloccato dal budget.
+ * Ritorna un messaggio d'errore se sfora, altrimenti null. */
 async function verificaBudgetSettimanale(
   scheduleId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string
 ): Promise<string | null> {
   if (isDomenicaTipo(tipo)) return null // domenica non conta mai nel budget, mai bloccata
+  if (tipo === 'riposo') return null // il riposo riduce sempre le ore, non può mai sforare
 
   const monday = getMonday(data)
   const sunday = new Date(monday)
@@ -509,6 +508,12 @@ DOMENICA — REGOLA ORE:
 I turni domenicali (domenica_lungo/domenica_corto) NON contano nel budget
 settimanale contrattuale. La domenica è sempre extra, compensata dal riposo
 nella settimana PRECEDENTE. Non bloccare mai un turno domenicale per eccesso ore.
+
+RIPOSO COMPENSATIVO DOMENICA:
+Quando assegni 'riposo' come compensativo domenicale, NON verificare il budget ore.
+Il riposo RIDUCE le ore settimanali, non le aumenta. Non bloccare mai un riposo.
+Es: settimana 3-8 agosto di Romeo = 28h normali → riposo mercoledì 5 agosto (4h)
+→ la settimana diventa 28 - 4 = 24h, MAI 28 + 4 = 32h.
 
 I tool update_shift e update_shift_week verificano automaticamente il budget ore
 settimanale e rifiutano l'operazione se la sforerebbe — se ricevi un errore di questo
