@@ -179,6 +179,7 @@ export default function ManagerPage() {
   // mai riordinati per settimana ISO (la colonna TOT si inserisce dopo ogni domenica,
   // ma l'ordine dei giorni non cambia mai).
   const giorniOrdinati = giorni
+  const offsetLunedi = getOffsetLunedi(anno, mese)
   const isMD = storeNome === MD_LANCIANO_STORE_NOME
 
   useEffect(() => {
@@ -980,6 +981,9 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
               <thead>
                 <tr className="border-b">
                   <th className="text-left p-3 font-semibold text-gray-700 sticky left-0 bg-white min-w-32">Dipendente</th>
+                  {Array.from({ length: offsetLunedi }).map((_, i) => (
+                    <th key={`empty-h-${i}`} className={`p-2 ${isMD ? 'min-w-14' : 'min-w-10'} bg-gray-50 border-b`} />
+                  ))}
                   {giorniOrdinati.map(g => (
                     <Fragment key={g.data}>
                       <th className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'}`}>
@@ -1006,6 +1010,9 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
                         </div>
                       </button>
                     </td>
+                    {Array.from({ length: offsetLunedi }).map((_, i) => (
+                      <td key={`empty-b-${emp.id}-${i}`} className="bg-gray-50 border-b" />
+                    ))}
                     {giorniOrdinati.map(g => {
                       const shift = getShift(emp.id, g.data)
                       const tipo = shift?.tipo || 'riposo'
@@ -1145,7 +1152,7 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
                     const minRichiesto = isSabato ? 4 : 3
                     const chiusuristi = employees
                       .map(emp => ({ emp, shift: getShift(emp.id, g.data) }))
-                      .filter(({ shift }) => shift?.ora_fine === '20:00')
+                      .filter(({ shift }) => shift?.ora_fine?.startsWith('20:00'))
                     const ok = chiusuristi.length >= minRichiesto
 
                     return (
@@ -1377,6 +1384,14 @@ function getDays(anno: number, mese: number) {
     d.setDate(d.getDate() + 1)
   }
   return days
+}
+
+/** Offset del primo giorno del mese rispetto a Lunedì (0=Lun...6=Dom) — usato per
+ * allineare la tabella come un calendario iPhone: celle vuote prima del giorno 1
+ * se il mese non inizia di Lunedì. */
+function getOffsetLunedi(anno: number, mese: number): number {
+  const primoGiorno = new Date(anno, mese - 1, 1).getDay()
+  return primoGiorno === 0 ? 6 : primoGiorno - 1
 }
 
 /** Settimane reali Lun-Dom del mese (per il PDF settimanale) — sempre a partire dal
