@@ -287,6 +287,26 @@ export default function ManagerPage() {
     await loadData()
   }
 
+  async function generaSettimana() {
+    if (!schedule || !settimanaAttiva) return
+    const giorniLunSab = settimanaAttiva.giorni.filter(g => !g.domenica)
+    const weekStart = giorniLunSab[0]?.data
+    const weekEnd = giorniLunSab[giorniLunSab.length - 1]?.data
+    if (!weekStart || !weekEnd) return
+
+    setLoading(true)
+    const res = await fetch('/api/shifts/generate-week', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ schedule_id: schedule.id, week_start: weekStart, week_end: weekEnd })
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      setError(`Errore generazione settimana: ${data.error ?? res.statusText}`)
+    }
+    await loadData()
+  }
+
   function controllaTurni() {
     const settimane = getSettimaneLunDom(giorni, mese)
 
@@ -875,6 +895,12 @@ Puoi:
                 <option key={i} value={i}>Sett. {i + 1}: {s.label}</option>
               ))}
             </select>
+          )}
+          {isMD && settimanaAttiva && schedule && (
+            <button onClick={generaSettimana} disabled={loading}
+              className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50">
+              {loading ? 'Generando...' : '⚡ Genera settimana'}
+            </button>
           )}
           {isMD && settimanaAttiva && (
             <button onClick={lavoraSuSettimana}

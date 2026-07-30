@@ -244,7 +244,7 @@ export function oreFromOrario(inizio?: string | null, fine?: string | null): num
 //   coppie (giorno+indice)%4; per Romeo resta l'alternanza settimanale con Max.
 //   Solo le ORE per ogni giorno ora vengono dalla distribuzione intera, non più fisse a 6h.
 //
-function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_at'>[] {
+export function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_at'>[] {
   const { scheduleId, employees, unavailabilities, mese, anno } = params
 
   const giorni = getDaysInMonth(anno, mese)
@@ -417,6 +417,87 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
   correggiChiusura(shifts, employees)
 
   return shifts
+}
+
+interface GenerateWeekParams {
+  scheduleId: string
+  employees: Employee[]
+  unavailabilities: Unavailability[]
+  domenicaShifts: { employee_id: string; tipo: string }[] // turni domenicali già assegnati quella settimana
+  weekStart: string // Lun YYYY-MM-DD
+  weekEnd: string   // Sab YYYY-MM-DD
+}
+
+/** Genera i turni Lun-Sab di UNA settimana, rispettando le domeniche già assegnate.
+ * Riusa generateShiftsMD (stessa identica logica del mese intero — nessuna duplicazione
+ * delle regole per Romeo/cassiere22/Yuri/ecc.), filtra al range richiesto, poi applica
+ * un pass di bilanciamento automatico per chi ha già lavorato domenica quella settimana:
+ * stesse regole del bilanciamento interattivo di Maia (Romeo solo Lun/Mer/Ven, altri mai
+ * Sab/Dom, mai sotto il minimo contrattuale) ma applicato subito, senza conferma. */
+export function generateShiftsMDWeek(params: GenerateWeekParams): Omit<Shift, 'id' | 'created_at'>[] {
+  const { scheduleId, employees, unavailabilities, domenicaShifts, weekStart, weekEnd } = params
+
+  const startDate = new Date(weekStart + 'T00:00:00')
+  const mese = startDate.getMonth() + 1
+  const anno = startDate.getFullYear()
+
+  const shiftsMese = generateShiftsMD({
+    scheduleId, employees, unavailabilities, mese, anno, storeNome: MD_LANCIANO_STORE_NOME,
+  })
+  const shiftsSettimana = shiftsMese.filter(s => s.data >= weekStart && s.data <= weekEnd)
+
+  const domenicaMap: Record<string, number> = {}
+  for (const ds of domenicaShifts) {
+    domenicaMap[ds.employee_id] = ds.tipo === 'domenica_lungo' ? 5 : 3
+  }
+
+  for (const emp of employees) {
+    const oreDomenica = domenicaMap[emp.id]
+    if (!oreDomenica) continue
+
+    const empShifts = shiftsSettimana.filter(s => s.employee_id === emp.id && s.tipo !== 'riposo')
+    const oreFeriali = empShifts.reduce((sum, s) => sum + oreFromOrario(s.ora_inizio, s.ora_fine), 0)
+    const eccesso = (oreFeriali + oreDomenica) - emp.ore_settimanali
+    if (eccesso <= 0) continue
+
+    const isRomeo = emp.nome === 'Romeo'
+    const isCassiera22 = emp.priorita_cassa === 1
+    const minGiorno = CONFIG_ORE_CONTRATTO[emp.ore_settimanali]?.min ?? 3
+
+    const candidati = empShifts
+      .filter(s => {
+        const dow = new Date(s.data + 'T00:00:00').getDay()
+        if (dow === 6 || dow === 0) return false // mai sabato/domenica come recupero
+        if (isRomeo) return dow === 1 || dow === 3 || dow === 5 // Romeo: SOLO Lun/Mer/Ven
+        return true
+      })
+      .sort((a, b) => oreFromOrario(b.ora_inizio, b.ora_fine) - oreFromOrario(a.ora_inizio, a.ora_fine))
+
+    for (const s of candidati) {
+      const oreGiorno = oreFromOrario(s.ora_inizio, s.ora_fine)
+      const isMattina = s.tipo === 'mattina' || s.tipo === 'mattina_corta'
+
+      if (oreGiorno === eccesso) {
+        s.tipo = 'riposo'
+        s.ora_inizio = undefined
+        s.ora_fine = undefined
+        break
+      }
+
+      const oreNuove = oreGiorno - eccesso
+      if (oreNuove >= minGiorno) {
+        const nuovoOrario = isMattina
+          ? (isCassiera22 ? orarioMattinaFlessibile(oreNuove) : orarioMattina(oreNuove))
+          : orarioPomeriggio(oreNuove)
+        s.tipo = isMattina ? 'mattina' : 'pomeriggio'
+        s.ora_inizio = nuovoOrario.inizio
+        s.ora_fine = nuovoOrario.fine
+        break
+      }
+    }
+  }
+
+  return shiftsSettimana
 }
 
 /** R7 — Chiusura 20:00: minimo 3 persone (sabato 4). Pass di correzione post-generazione:
