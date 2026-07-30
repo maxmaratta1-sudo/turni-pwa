@@ -413,10 +413,13 @@ function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees:
     let chiusura = dayShifts.filter(s => s.ora_fine === '20:00').length
     if (chiusura >= minRichiesto) continue
 
+    const dayOfWeek = new Date(data + 'T00:00:00').getDay()
     const candidati = dayShifts
       .filter(s => {
         const emp = employees.find(e => e.id === s.employee_id)
         if (!emp || ['Gilda', 'Tony', 'Yuri', 'Max'].includes(emp.nome)) return false
+        // Romeo: Lun/Mer/Ven sono scarico merce, regola assoluta — mai convertire.
+        if (emp.nome === 'Romeo' && (dayOfWeek === 1 || dayOfWeek === 3 || dayOfWeek === 5)) return false
         return s.tipo === 'mattina' && s.ora_fine !== '20:00'
       })
       .sort((a, b) => oreFromOrario(b.ora_inizio, b.ora_fine) - oreFromOrario(a.ora_inizio, a.ora_fine))
