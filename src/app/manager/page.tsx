@@ -305,6 +305,21 @@ export default function ManagerPage() {
       setError(`Errore generazione settimana: ${data.error ?? res.statusText}`)
     }
     await loadData()
+    setLoading(false)
+  }
+
+  async function resetSettimana() {
+    if (!schedule || !settimanaAttiva) return
+    const inizio = settimanaAttiva.giorni[0]?.data
+    const fine = settimanaAttiva.giorni[settimanaAttiva.giorni.length - 1]?.data
+    if (!inizio || !fine) return
+    if (!window.confirm(`Cancellare turni e permessi della settimana ${settimanaAttiva.label}?`)) return
+
+    setLoading(true)
+    await supabase.from('shifts').delete().eq('schedule_id', schedule.id).gte('data', inizio).lte('data', fine)
+    await supabase.from('unavailabilities').delete().eq('schedule_id', schedule.id).gte('data', inizio).lte('data', fine)
+    await loadData()
+    setLoading(false)
   }
 
   function controllaTurni() {
@@ -909,6 +924,12 @@ Puoi:
             <button onClick={generaSettimana} disabled={loading}
               className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50">
               {loading ? 'Generando...' : '⚡ Genera settimana'}
+            </button>
+          )}
+          {isMD && settimanaAttiva && schedule && (
+            <button onClick={resetSettimana} disabled={loading}
+              className="bg-red-100 text-red-600 px-4 py-2 rounded hover:bg-red-200 border border-red-200 disabled:opacity-50">
+              🗑️ Reset settimana
             </button>
           )}
           {isMD && settimanaAttiva && (
