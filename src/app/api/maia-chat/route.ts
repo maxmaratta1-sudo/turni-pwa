@@ -227,6 +227,10 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (erroreOre) return erroreOre
     const { error } = await upsertShift(ctx.scheduleId, emp.id, input.data, input.tipo)
     if (error) return `Errore salvataggio turno: ${error.message}`
+    if (isDomenicaTipo(input.tipo)) {
+      const oreDomenica = input.tipo === 'domenica_lungo' ? 5 : 3
+      return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). IMPORTANTE: ora DEVI chiedere a Giacomo in quale giorno della settimana PRECEDENTE vuole che ${emp.nome} recuperi le ${oreDomenica} ore lavorate domenica — non concludere il flusso senza aver fatto questa domanda.`
+    }
     return `OK: turno di ${emp.nome} il ${input.data} impostato su "${input.tipo}".`
   }
 
@@ -251,7 +255,10 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (modificati === 0 && bloccatiPerOre > 0) {
       return `Errore: impossibile assegnare "${input.tipo}" a ${emp.nome} per nessuno dei giorni richiesti — supererebbe il contratto di ${emp.ore_settimanali}h in ${bloccatiPerOre} giorno/i. Proponi un'alternativa.`
     }
-    return `OK: turno di ${emp.nome} impostato su "${input.tipo}" per ${modificati} giorni (${input.data_inizio} → ${input.data_fine})${saltati > 0 ? `, ${saltati} domeniche escluse` : ''}${bloccatiPerOre > 0 ? `, ${bloccatiPerOre} giorni saltati per superamento ore contrattuali` : ''}.`
+    const notaOre = isTipoDomenica && modificati > 0
+      ? ` IMPORTANTE: ora DEVI chiedere a Giacomo in quale/i giorno/i della settimana PRECEDENTE ${emp.nome} deve recuperare le ore domenicali lavorate — non concludere il flusso senza questa domanda.`
+      : ''
+    return `OK: turno di ${emp.nome} impostato su "${input.tipo}" per ${modificati} giorni (${input.data_inizio} → ${input.data_fine})${saltati > 0 ? `, ${saltati} domeniche escluse` : ''}${bloccatiPerOre > 0 ? `, ${bloccatiPerOre} giorni saltati per superamento ore contrattuali` : ''}.${notaOre}`
   }
 
   if (toolName === 'get_employee_shifts') {
@@ -467,6 +474,14 @@ REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente
 - Quando Giacomo assegna turni domenicali, Maia deve automaticamente proporre anche il riposo compensativo NELLA SETTIMANA PRECEDENTE.
   Es: "Ho assegnato Cristina domenica 9 agosto 08-13. Vuoi che le assegni il riposo compensativo di 5h nella settimana precedente (4-8 agosto)? Se sì, dimmi quale giorno."
 
+FLUSSO DOMENICA OBBLIGATORIO:
+Quando Giacomo assegna un turno domenicale (domenica_lungo o domenica_corto) tramite update_shift/update_shift_week:
+1. Il tool calcola già le ore (domenica_lungo=5h, domenica_corto=3h) e ti segnala che DEVI chiedere il recupero.
+2. Rispondi SEMPRE con: "✅ Turno domenicale assegnato a [nome]. In quale giorno della settimana precedente ([date Lun-Sab]) vuole che [nome] recuperi le [X] ore lavorate domenica?"
+3. Quando Giacomo indica il giorno → usa update_shift con tipo "riposo" su quella data.
+4. Conferma: "✅ [Nome] riposa [giorno] per compensare le ore domenicali."
+NON considerare completo il flusso domenicale finché non hai gestito il riposo compensativo — se Giacomo cambia argomento senza rispondere, puoi lasciar perdere, ma la domanda va sempre fatta subito dopo l'assegnazione.
+
 ⚠️ REGOLA CRITICA SULLE ORE:
 Le ore settimanali di ogni dipendente DEVONO corrispondere ESATTAMENTE alle ore del contratto.
 NON è accettabile che un dipendente da 22h faccia 36h settimanali.
@@ -489,9 +504,16 @@ set_assenza, MAI update_shift. Il tool update_shift è solo per turni lavorativi
 (mattina, pomeriggio, full). Esempio: "metti Angelica in ferie martedì 5" → set_assenza
 con tipo_assenza="F", NON update_shift con tipo="riposo".
 
+REGOLA CRITICA SU save_rule:
+NON salvare mai una regola automaticamente.
+Prima di usare il tool save_rule, DEVI sempre chiedere conferma esplicita:
+"Vuoi che salvi questa come regola permanente? Rispondo sì/no."
+Solo se Giacomo risponde esplicitamente "sì" → usa il tool save_rule.
+Se Giacomo sta solo descrivendo la situazione o spiegando come funziona qualcosa → NON salvare nulla, è solo contesto.
+
 COMPORTAMENTO:
 - Rispondi sempre in italiano, sii concisa e pratica
-- Se Giacomo dice frasi tipo "da oggi...", "sempre...", "d'ora in poi..." per introdurre una nuova regola permanente, usa il tool save_rule per salvarla
+- Se Giacomo dice frasi tipo "da oggi...", "sempre...", "d'ora in poi..." per introdurre una nuova regola permanente, chiedi PRIMA conferma esplicita (vedi sopra) e solo dopo il sì usa il tool save_rule per salvarla
 - Se Giacomo chiede di rimuovere/disattivare una regola custom, usa list_rules per trovarla e poi delete_rule
 - Se ti chiede quali regole custom sono attive, usa list_rules
 - Puoi modificare i turni usando i tool a disposizione — se ti chiedono una modifica, USA il tool invece di limitarti a descriverla, altrimenti non viene salvata davvero

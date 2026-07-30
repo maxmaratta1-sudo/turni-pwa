@@ -142,6 +142,10 @@ const CONFIG_ORE_CONTRATTO: Record<number, { sabato: number; min: number; max: n
   36: { sabato: 6, min: 6, max: 6 }, // Gilda/Tony — fisso, nessuna variazione (gestito comunque da R1)
 }
 
+// R5 — 28h con orario fisso per giorno feriale (Cristina/Stefania). getDay(): 1=Lun...5=Ven.
+// Lun5/Mar4/Mer5/Gio4/Ven4 = 22h feriali + Sab6 = 28h esatte (mattina Lun/Mer/Ven, pomeriggio Mar/Gio).
+const ORE_28H_FERIALI: Record<number, number> = { 1: 5, 2: 4, 3: 5, 4: 4, 5: 4 }
+
 /** Distribuisce ore intere su N giorni, rispettando min/max giornaliero. */
 function distribuisciOre(oreRimanenti: number, giorni: number, min: number, max: number): number[] {
   const result: number[] = []
@@ -337,7 +341,8 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
           }
         }
       }
-      // R5 — Cristina (30h) e Stefania (28h): giorni fissi Lun/Mer/Ven mattina, Mar/Gio/Sab pomeriggio.
+      // R5 — Cristina e Stefania (28h): giorni fissi Lun/Mer/Ven mattina, Mar/Gio/Sab pomeriggio.
+      // 28h: ore fisse per giorno feriale (Lun5/Mar4/Mer5/Gio4/Ven4 = 22h, +Sab6 = 28h esatte).
       else if (emp.priorita_cassa === 2 || emp.priorita_cassa === 3) {
         const mattinaGiorni = [1, 3, 5]
         const mattinaOra = mattinaGiorni.includes(dayOfWeek)
@@ -347,7 +352,9 @@ function generateShiftsMD(params: GenerateParams): Omit<Shift, 'id' | 'created_a
           tipo = mattinaSabato ? 'mattina' : 'pomeriggio'
           orario = mattinaSabato ? orarioMattina(6) : orarioPomeriggio(6)
         } else {
-          const ore = getPianoGiorno(emp, settimana, weekdayIdx)
+          const ore = emp.ore_settimanali === 28
+            ? (ORE_28H_FERIALI[dayOfWeek] ?? 0)
+            : getPianoGiorno(emp, settimana, weekdayIdx)
           if (ore <= 0) { tipo = 'riposo'; orario = null }
           else {
             tipo = mattinaOra ? 'mattina' : 'pomeriggio'
