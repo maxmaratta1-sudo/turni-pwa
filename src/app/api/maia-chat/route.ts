@@ -32,7 +32,7 @@ const tools: Anthropic.Tool[] = [
         },
         ore: {
           type: 'number',
-          description: 'SOLO con tipo="mattina" o "pomeriggio": numero esatto di ore del turno (es. 3, 4 o 5) quando stai applicando una riduzione precisa proposta dal bilanciamento domenica — calcola l\'orario reale corretto invece di usare l\'orario fisso standard. Omesso = orario standard fisso per il tipo.',
+          description: 'SOLO con tipo="mattina" o "pomeriggio": numero esatto di ore del turno (es. 3, 4, 5 o 6). USALO SEMPRE quando Giacomo specifica un orario esplicito (es. "dalle 15 alle 20", "9-13") o un numero di ore esplicito — calcola l\'orario reale corretto invece di usare l\'orario fisso standard/automatico (che potrebbe differire, es. sabato normalmente 6h fisso). Un comando esplicito di Giacomo ha SEMPRE priorità sulle regole automatiche (sabato, contratto standard, ecc.). Omesso = orario standard fisso per il tipo.',
         },
       },
       required: ['employee_name', 'data', 'tipo'],
@@ -50,6 +50,10 @@ const tools: Anthropic.Tool[] = [
         tipo: {
           type: 'string',
           enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto', 'turno_breve_11_14', 'turno_breve_12_15', 'turno_breve_13_16', 'turno_breve_17_20'],
+        },
+        ore: {
+          type: 'number',
+          description: 'SOLO con tipo="mattina" o "pomeriggio": numero esatto di ore da applicare OGNI giorno del range. USALO quando Giacomo specifica un orario/ore esplicito per tutta la settimana — ha priorità su qualunque regola automatica (es. sabato 6h fisso per 28h). Omesso = orario automatico per contratto/giorno.',
         },
       },
       required: ['employee_name', 'data_inizio', 'data_fine', 'tipo'],
@@ -445,10 +449,13 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     for (const d of dates) {
       const dayOfWeek = new Date(d + 'T00:00:00').getDay()
       if (dayOfWeek === 0 && !isTipoDomenica) { saltati++; continue }
+      // Un "ore" esplicito di Giacomo ha SEMPRE priorità sulle regole automatiche sotto —
+      // quelle valgono solo quando Giacomo non ha specificato ore esatte.
+      const oreEsplicite: number | undefined = typeof input.ore === 'number' ? input.ore : undefined
       // Cristina/Stefania (28h): ore giornaliere fisse e diverse per giorno (mai lo stesso
       // orario standard tutti i giorni) — sabato 6h, feriali secondo ORE_28H_FERIALI.
-      let oreOverride: number | undefined
-      if (isCristinaStefania && (input.tipo === 'mattina' || input.tipo === 'pomeriggio')) {
+      let oreOverride: number | undefined = oreEsplicite
+      if (oreOverride === undefined && isCristinaStefania && (input.tipo === 'mattina' || input.tipo === 'pomeriggio')) {
         oreOverride = dayOfWeek === 6 ? 6 : ORE_28H_FERIALI[dayOfWeek]
       }
       const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, d, input.tipo, emp.ore_settimanali, emp.nome, oreOverride)
@@ -673,6 +680,14 @@ Quando Giacomo assegna Ferie (F) → scala 1 giorno dal saldo ferie del dipenden
 Quando Giacomo assegna Permesso (P) → scala le ore del turno dal saldo permessi
 Avvisare Giacomo se un dipendente ha saldo insufficiente prima di procedere
 
+REGOLA ASSOLUTA — COMANDI ESPLICITI DI GIACOMO:
+Quando Giacomo specifica esattamente ora_inizio e ora_fine (o un numero di ore preciso) per un turno,
+usare SEMPRE quelle ore esatte — passa il parametro "ore" al tool (update_shift/update_shift_week) —
+MAI modificarle per nessuna regola automatica. Le regole sotto (sabato sempre 6h, orario standard
+per contratto, ecc.) valgono SOLO quando generi/assegni tu senza indicazioni precise — NON quando
+Giacomo dà un comando esplicito con orario. Es: "metti Damiana sabato dalle 15 alle 20" → tipo
+"pomeriggio", ore 5 (→ 15/20), anche se il sabato normalmente sarebbe 6h fisso (14/20).
+
 REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
 1. Gilda e Tony: sempre mattina 08-14, mai domenica
 2. Yuri: Lun/Mer/Ven 08-16 in sala (turno yuri_full); Mar/Gio 13-16 in sala (turno yuri_pomeriggio, mattina in salumeria); Sab 08-14; Dom riposo
@@ -799,6 +814,18 @@ le 5h di un turno domenica_lungo). MAI Mar/Gio (4h — non bilanciano esattament
 Sabato. Il tool update_shift propone automaticamente tutte le opzioni valide tra
 Lun/Mer/Ven di quella settimana — riportale a Giacomo così: "lunedì X, mercoledì Y o
 venerdì Z" e fagli scegliere quale preferisce, poi applica con recupero_domenicale:true.
+
+CASSIERE 22h (Angelica/Damiana/Elisa/Marilena) — RIPOSO COMPENSATIVO DOMENICA:
+- domenica_lungo (5h) → il tool propone un giorno feriale della settimana PRECEDENTE
+  da mettere a riposo completo (bilancia esattamente le 5h).
+- domenica_corto (3h) → il tool propone di ridurre le ore di un giorno feriale della
+  settimana PRECEDENTE (mai sotto il minimo contrattuale di 3h/giorno).
+- La settimana PRECEDENTE = i giorni Lun-Sab immediatamente prima della domenica lavorata
+  (mai Sab compreso come giorno di recupero, mai la settimana successiva alla domenica).
+- Il tool calcola già tutto sulle ore REALI di quella settimana — riporta a Giacomo
+  esattamente la proposta (giorno + nuove ore), applica con update_shift solo dopo
+  conferma esplicita, usando "riposo"+recupero_domenicale:true oppure tipo+ore secondo
+  il flusso generico "BILANCIAMENTO DOMENICA 22h/28h" sopra.
 
 I tool update_shift e update_shift_week verificano automaticamente il budget ore
 settimanale e rifiutano l'operazione se la sforerebbe — se ricevi un errore di questo
