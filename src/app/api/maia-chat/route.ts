@@ -826,6 +826,16 @@ Prima di usare il tool save_rule, DEVI sempre chiedere conferma esplicita:
 Solo se Giacomo risponde esplicitamente "sì" → usa il tool save_rule.
 Se Giacomo sta solo descrivendo la situazione o spiegando come funziona qualcosa → NON salvare nulla, è solo contesto.
 
+IMPORTANTE — ESECUZIONE IMMEDIATA:
+Quando devi generare/modificare turni per una settimana intera con più dipendenti (es. "genera i
+turni della settimana per tutti"), NON limitarti a descrivere un piano in una tabella e poi dire
+"procedo" — chiama SUBITO i tool (update_shift/update_shift_week/set_assenza) per ogni dipendente,
+uno dopo l'altro, nella stessa risposta. Se i dipendenti sono molti, va benissimo chiamare i tool
+su più turni consecutivi di conversazione (il sistema continua automaticamente finché non hai
+finito) — ma OGNI turno di risposta deve contenere almeno una chiamata reale ai tool, mai solo
+testo che promette un'azione futura. Non dire mai "procedo con tutte le assegnazioni" senza aver
+già incluso le chiamate ai tool corrispondenti in quella stessa risposta.
+
 COMPORTAMENTO:
 - Rispondi sempre in italiano, sii concisa e pratica
 - Se Giacomo dice frasi tipo "da oggi...", "sempre...", "d'ora in poi..." per introdurre una nuova regola permanente, chiedi PRIMA conferma esplicita (vedi sopra) e solo dopo il sì usa il tool save_rule per salvarla
@@ -843,19 +853,28 @@ COMPORTAMENTO:
       content: m.content,
     }))
 
+    const MAX_TOKENS = 4096
+    const MAX_ITERAZIONI = 15
+
     let response = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
+      max_tokens: MAX_TOKENS,
       system,
       messages: anthropicMessages,
       ...(canUseTools ? { tools } : {}),
     })
+    if (response.stop_reason === 'max_tokens') {
+      console.error('[maia-chat] PRIMA RISPOSTA TRONCATA per max_tokens — Claude non ha potuto emettere i tool_use. Aumentare MAX_TOKENS o far generare piani più corti.')
+    }
 
     let toolUsed = false
 
-    // Loop finché Claude continua a chiedere tool_use (max 5 iterazioni di sicurezza)
-    for (let i = 0; i < 5 && response.stop_reason === 'tool_use'; i++) {
+    // Loop finché Claude continua a chiedere tool_use (max iterazioni di sicurezza — alzato
+    // da 5 a 15 perché generazioni grandi, es. 12 dipendenti × 6 giorni, richiedono più turni
+    // di tool calling per completarsi senza troncarsi a metà).
+    for (let i = 0; i < MAX_ITERAZIONI && response.stop_reason === 'tool_use'; i++) {
       const toolUseBlocks = response.content.filter(b => b.type === 'tool_use') as Anthropic.ToolUseBlock[]
+      console.log(`[maia-chat] iterazione ${i + 1}/${MAX_ITERAZIONI} — tool_use blocks in questo turno: ${toolUseBlocks.length}`, toolUseBlocks.map(b => b.name))
 
       anthropicMessages.push({ role: 'assistant', content: response.content })
 
@@ -875,11 +894,17 @@ COMPORTAMENTO:
 
       response = await anthropic.messages.create({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1024,
+        max_tokens: MAX_TOKENS,
         system,
         messages: anthropicMessages,
         ...(canUseTools ? { tools } : {}),
       })
+      if (response.stop_reason === 'max_tokens') {
+        console.error(`[maia-chat] Risposta troncata per max_tokens all'iterazione ${i + 1}.`)
+      }
+      if (i === MAX_ITERAZIONI - 1 && response.stop_reason === 'tool_use') {
+        console.error('[maia-chat] Raggiunto il limite massimo di iterazioni con ancora tool_use pendenti — generazione probabilmente incompleta.')
+      }
     }
 
     const textBlock = response.content.find(b => b.type === 'text')
