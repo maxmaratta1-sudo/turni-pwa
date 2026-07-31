@@ -123,6 +123,14 @@ const tools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'get_config',
+    description: 'Rilegge la configurazione turni aggiornata da Supabase (turni_config) — usa se Giacomo chiede di verificare o aggiornare le regole, o se sospetti che la configurazione nel prompt sia cambiata durante la conversazione.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
     name: 'set_alternanza',
     description: 'Imposta chi fa mattina questa settimana tra Max e Romeo — da usare SOLO se Giacomo lo chiede esplicitamente di cambiare l\'alternanza, non per consultare chi tocca (usa il contesto già calcolato per quello).',
     input_schema: {
@@ -591,6 +599,17 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     return data.map(r => `[${r.id}] ${r.regola}`).join('\n')
   }
 
+  if (toolName === 'get_config') {
+    const { data, error } = await supabaseAdmin
+      .from('turni_config')
+      .select('config, updated_at')
+      .eq('store_id', ctx.storeId)
+      .maybeSingle()
+    if (error) return `Errore lettura configurazione: ${error.message}`
+    if (!data?.config) return 'Nessuna configurazione turni_config trovata per questo negozio.'
+    return `Configurazione aggiornata (ultima modifica ${data.updated_at}):\n${JSON.stringify(data.config, null, 2)}`
+  }
+
   return `Errore: tool "${toolName}" non riconosciuto.`
 }
 
@@ -649,30 +668,26 @@ export async function POST(req: NextRequest) {
       : ''
   }
 
-  const system = `Sei Maia, assistente AI per la gestione turni di MD Lanciano (supermercato).
+  let configText = ''
+  let config: any = null
+  if (storeId) {
+    const { data: configRow } = await supabaseAdmin
+      .from('turni_config')
+      .select('config')
+      .eq('store_id', storeId)
+      .maybeSingle()
+    config = configRow?.config ?? null
+    if (config) {
+      configText = `\nCONFIGURAZIONE COMPLETA (fonte di verità assoluta — consultala sempre prima di rispondere):\n${JSON.stringify(config, null, 2)}\n\nREGOLE DI COMPORTAMENTO SULLA CONFIGURAZIONE:\n1. Consulta SEMPRE la configurazione sopra prima di ogni decisione — è l'unica fonte di verità per orari, contratti, alternanze, riposo compensativo, assenze e turni brevi.\n2. Se un'informazione non è nella configurazione, chiedi a Giacomo invece di indovinare.\n3. Ogni dipendente ha un "pattern_standard" (default) e una "flessibilita" (margine di eccezione). Usa il pattern_standard di default; usa la flessibilità solo se Giacomo lo richiede esplicitamente o se serve per coprire un'esigenza operativa.\n4. Rispetta sempre "max_ore_giorno" e "ore_contratto" di ogni dipendente — MAI superarli, salvo la flessibilità esplicitamente descritta per quel dipendente o un comando esplicito di Giacomo (vedi regola sotto).\n5. La domenica: leggi "regole_generali.domenica" — solo Giacomo autorizza, esclusi_assoluti non trattabili in nessun caso.\n6. Riposo compensativo: leggi "regole_generali.riposo_compensativo" e il campo "riposo_compensativo" del singolo dipendente per le eccezioni (es. Romeo: solo Lun/Mer/Ven).\n7. Assenze (F/P/R/M/MT): leggi "regole_generali.assenze" per sapere cosa scalare e da dove.\n8. Alternanze (Max/Romeo, Cristina/Stefania, cassiere 22h): leggi i campi "alternanza" di ogni dipendente — calcola sempre automaticamente, non chiedere mai a Giacomo chi fa cosa se il dato è calcolabile (per Max/Romeo usa comunque la sezione ALTERNANZA dinamica sotto, se presente, che riflette la settimana corrente).\n`
+    }
+  }
+
+  const system = `Sei Maia, assistente AI per la gestione turni di ${config?.store ?? 'MD Lanciano'} (supermercato).
 
 ${dataContext}
 
 ${context ?? ''}
-
-VINCOLI ORARI NEGOZIO:
-- Apertura: 08:00 — Chiusura: 20:00
-- Nessun turno può iniziare prima delle 08:00 o finire dopo le 20:00
-- Turni pomeridiani: fine sempre 20:00, inizio = 20:00 - ore del turno
-  Es: 4h pomeriggio → 16/20 | 5h → 15/20 | 6h → 14/20
-- Mai iniziare un turno pomeridiano oltre le 17:00
-
-ORE GIORNALIERE PER CONTRATTO:
-- 22h: min 3h/giorno, max 5h/giorno — sabato sempre 5h (8/13)
-- 28h: min 4h/giorno, max 6h/giorno — sabato sempre 6h
-- 35h: min 5h/giorno, max 6h/giorno — sabato sempre 6h
-- 30h (Max): sempre 5h fisso — mattina 8/13, pomeriggio 14/19 — alterna con Romeo
-- 36h: sempre 6h/giorno — sabato 6h
-
-CASSIERE 22h — ORARIO INIZIO MATTINA FLESSIBILE:
-- Possono iniziare alle 08:00, 09:00 o 10:00
-- Fine = inizio + ore assegnate
-- La scelta dipende dalla copertura necessaria
+${configText}
 ${regoleCustomText}
 ${saldiText}
 
@@ -683,60 +698,27 @@ Avvisare Giacomo se un dipendente ha saldo insufficiente prima di procedere
 REGOLA ASSOLUTA — COMANDI ESPLICITI DI GIACOMO:
 Quando Giacomo specifica esattamente ora_inizio e ora_fine (o un numero di ore preciso) per un turno,
 usare SEMPRE quelle ore esatte — passa il parametro "ore" al tool (update_shift/update_shift_week) —
-MAI modificarle per nessuna regola automatica. Le regole sotto (sabato sempre 6h, orario standard
-per contratto, ecc.) valgono SOLO quando generi/assegni tu senza indicazioni precise — NON quando
-Giacomo dà un comando esplicito con orario. Es: "metti Damiana sabato dalle 15 alle 20" → tipo
-"pomeriggio", ore 5 (→ 15/20), anche se il sabato normalmente sarebbe 6h fisso (14/20).
-
-REGOLE ASSOLUTE (non modificabili salvo ordine esplicito di Giacomo):
-1. Gilda e Tony: sempre mattina 08-14, mai domenica
-2. Yuri: Lun/Mer/Ven 08-16 in sala (turno yuri_full); Mar/Gio 13-16 in sala (turno yuri_pomeriggio, mattina in salumeria); Sab 08-14; Dom riposo
-3. Carlo: Mar e Gio obbligatoriamente mattina; altri giorni preferenza mattina, pomeriggio solo se serve bilanciare le ore
-4. Max: sempre 5h — mattina_corta 08-13 o pomeriggio_corto 14-19; alterna con Romeo a settimane alterne (turni standard da 6h per Romeo). Chi tocca mattina/pomeriggio questa settimana è già calcolato automaticamente (vedi sezione ALTERNANZA sopra, se presente) — NON chiedere a Giacomo chi tocca, usa quel dato. Cambialo solo se Giacomo lo chiede esplicitamente (tool set_alternanza).
+MAI modificarle per nessuna regola automatica della configurazione (sabato standard, pattern del
+contratto, ecc.). Quelle regole valgono SOLO quando generi/assegni tu senza indicazioni precise —
+NON quando Giacomo dà un comando esplicito con orario. Es: "metti Damiana sabato dalle 15 alle 20"
+→ tipo "pomeriggio", ore 5 (→ 15/20), anche se il pattern_standard del sabato sarebbe diverso.
 
 MAX E ROMEO — ALTERNANZA SETTIMANALE ASSOLUTA:
 Ogni settimana uno fa mattina e l'altro pomeriggio — MAI entrambi uguale.
 Il calcolo è automatico da database — non chiedere mai a Giacomo.
 Se il contesto dice "Romeo mattina" → Max DEVE fare pomeriggio, senza eccezioni.
 Se il contesto dice "Max mattina" → Romeo DEVE fare pomeriggio, senza eccezioni.
-5. Cassiere 22h (Marilena, Angelica, Elisa, Damiana): 2 di mattina + 2 di pomeriggio ogni giorno
-6. Fascia 13-16: sempre Yuri presente + minimo 1 altro cassiere
-7. Chiusura 20:00: minimo 3 persone (sabato 4)
-8. Cristina e Stefania: 3 mattine + 3 pomeriggi a settimana ciascuna (Lun/Mer/Ven mattina, Mar/Gio/Sab pomeriggio)
 
-CRISTINA E STEFANIA (28h) — REGOLA ORE:
-MAI assegnare 6h per 6 giorni = 36h. Budget settimanale: 28h esatte.
-Sabato: 6h fisso.
-Lun-Ven: 22h totali in 5 giorni → distribuire come 5+4+5+4+4 (Lun/Mer 5h, Mar/Gio/Ven 4h) — MAI lo stesso orario tutti i giorni.
-I tool update_shift/update_shift_week calcolano già in automatico l'orario corretto per giorno quando assegni "mattina"/"pomeriggio" a Cristina o Stefania — non serve specificare tu le ore manualmente, ma se Giacomo chiede ore diverse dal pattern standard usa il parametro "ore" per un giorno specifico.
-Orari corretti risultanti:
-- Mattina 4h → 09/13
-- Mattina 5h → 08/13
-- Pomeriggio 4h → 16/20
-- Pomeriggio 5h → 15/20
-- Pomeriggio 6h → 14/20 (solo sabato)
-Per sabato usa SEMPRE tipo "mattina" o "pomeriggio" (mai "mattina_corta"/"pomeriggio_corto", quelli sono solo per le ore ridotte nei giorni feriali) — il tool applica automaticamente le 6h corrette.
-
-TURNI BREVI (casi eccezionali):
-Disponibili per tutti i dipendenti su richiesta di Giacomo:
-- turno_breve_11_14 → 11:00-14:00 (3h)
-- turno_breve_12_15 → 12:00-15:00 (3h)
-- turno_breve_13_16 → 13:00-16:00 (3h)
-- turno_breve_17_20 → 17:00-20:00 (3h)
-Quando Giacomo dice "metti [nome] turno breve [orario]" o indica direttamente una fascia oraria di 3h (es. "11-14", "dalle 17 alle 20") → usa il tipo turno_breve corrispondente, non "mattina"/"pomeriggio".
+TURNI BREVI (casi eccezionali) — vedi anche "regole_generali.turni_brevi_eccezionali" in configurazione:
+Quando Giacomo dice "metti [nome] turno breve [orario]" o indica direttamente una fascia oraria di 3h
+(es. "11-14", "dalle 17 alle 20") → usa il tipo turno_breve corrispondente, non "mattina"/"pomeriggio".
 Es: "metti Angelica 11-14 giovedì" → tipo: turno_breve_11_14.
 Eccezione: 13-16 per Yuri resta sempre yuri_pomeriggio (il suo turno fisso), MAI turno_breve_13_16 — quella distinzione vale solo per lui.
 
-REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente):
-- Il supermercato è aperto 08:00–13:00
-- Lavorano 3 persone: 2 dalle 08:00 alle 13:00 (5h, turno domenica_lungo), 1 dalle 10:00 alle 13:00 (3h, turno domenica_corto)
-- ECCEZIONE ASSOLUTA: Gilda e Tony sono escluse DEFINITIVAMENTE dai turni domenicali, senza eccezioni — nemmeno su richiesta esplicita di Giacomo. Se te lo chiedesse, rispondi: "Gilda e Tony sono escluse in modo permanente dai turni domenicali — non posso assegnarle/gli la domenica."
-- Tutti gli altri dipendenti possono lavorare la domenica (nessuna eccezione automatica per loro — l'algoritmo di generazione automatica NON assegna mai turni domenicali a nessuno, sono sempre riposo di default finché Giacomo non li assegna manualmente)
-- Chi lavora domenica riceve un riposo compensativo nella settimana PRECEDENTE la domenica lavorata (non quella successiva), pari alle ore domenicali.
-  Es: lavora domenica 9 agosto (08-13, 5h) → il riposo compensativo va nella settimana 4-8 agosto (la settimana che precede il 9), nel giorno in cui avrebbe fatto 5h
-- SOLO Giacomo è autorizzato a chiedere a Maia di inserire turni domenicali
+REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente — vedi "regole_generali.domenica" in configurazione per orari/esclusi):
 - Se qualcun altro chiedesse di modificare turni domenicali, Maia deve rispondere:
   "Solo Giacomo è autorizzato a gestire i turni domenicali."
+- Se Giacomo chiede di assegnare domenica a un dipendente negli "esclusi_assoluti" della configurazione, rispondi che è escluso/a in modo permanente e non procedere.
 - Quando Giacomo assegna turni domenicali, Maia deve automaticamente proporre anche il riposo compensativo NELLA SETTIMANA PRECEDENTE.
   Es: "Ho assegnato Cristina domenica 9 agosto 08-13. Vuoi che le assegni il riposo compensativo di 5h nella settimana precedente (4-8 agosto)? Se sì, dimmi quale giorno."
 
