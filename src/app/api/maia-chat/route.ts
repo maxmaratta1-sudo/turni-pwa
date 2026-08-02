@@ -170,7 +170,14 @@ function getWeekIndex(dateStr: string): number {
   return Math.floor((d.getTime() - startOfYear.getTime()) / (7 * 24 * 60 * 60 * 1000))
 }
 
-/** Calcola chi fa mattina/pomeriggio (Max/Romeo) per la settimana data, a partire dall'ultimo riferimento salvato. */
+/** Calcola chi fa mattina/pomeriggio (Max/Romeo) per la settimana data, a partire dall'ultimo riferimento salvato.
+ * `dataSettimana` viene sempre ricondotta al lunedì della sua settimana PRIMA di calcolare
+ * getWeekIndex: getWeekIndex conta le settimane a blocchi di 7 giorni dal 1° gennaio, che nel
+ * 2026 è un giovedì — usato "com'è" su un giorno qualunque (es. un giovedì o sabato passato
+ * da Giacomo in chat) il confine di settimana cadrebbe a metà settimana lavorativa invece che
+ * tra domenica e lunedì, disallineando il risultato rispetto al generatore turni (src/lib/generator.ts,
+ * che usa lo stesso fix). Ancorare sempre al lunedì elimina il problema indipendentemente da
+ * quale giorno della settimana viene passato come `dataSettimana`. */
 async function chiMattina(storeId: string, dataSettimana: string): Promise<{ mattina: string; pomeriggio: string }> {
   const { data: rif } = await supabaseAdmin
     .from('turni_alternanza')
@@ -182,8 +189,8 @@ async function chiMattina(storeId: string, dataSettimana: string): Promise<{ mat
 
   if (!rif) return { mattina: 'Romeo', pomeriggio: 'Max' }
 
-  const settRif = getWeekIndex(rif.settimana_riferimento)
-  const settCorrente = getWeekIndex(dataSettimana)
+  const settRif = getWeekIndex(toDateStr(getMonday(rif.settimana_riferimento)))
+  const settCorrente = getWeekIndex(toDateStr(getMonday(dataSettimana)))
   const diff = settCorrente - settRif
 
   const nomeMattina = diff % 2 === 0 ? rif.nome_mattina : altroNome(rif.nome_mattina)
@@ -857,7 +864,7 @@ COMPORTAMENTO:
     const MAX_ITERAZIONI = 15
 
     let response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-5',
       max_tokens: MAX_TOKENS,
       system,
       messages: anthropicMessages,
@@ -893,7 +900,7 @@ COMPORTAMENTO:
       anthropicMessages.push({ role: 'user', content: toolResults })
 
       response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5',
         max_tokens: MAX_TOKENS,
         system,
         messages: anthropicMessages,

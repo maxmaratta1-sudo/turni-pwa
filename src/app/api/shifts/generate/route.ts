@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
     if (deleteErr) console.error('[shifts/generate] delete error:', JSON.stringify(deleteErr, null, 2))
 
     // Genera
-    const shifts = generateShifts({
+    const shifts = await generateShifts({
       scheduleId: schedule_id,
       employees: employees || [],
       unavailabilities: unavailabilities || [],
