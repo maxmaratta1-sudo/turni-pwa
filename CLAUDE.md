@@ -102,3 +102,31 @@ dati validi. Il prompt di Opus può essere raffinato in un giro successivo.
 Aggiunto un controllo di sicurezza post-generazione (`verificaBudgetSettimanale` in
 generator.ts) che logga un warning se il totale ore settimanale generato non combacia
 esattamente con `ore_contratto` — solo diagnostico, non blocca il salvataggio JS.
+
+**Giorni festivi italiani (4 agosto 2026)**: tabella `turni_festivi` (`store_id`, `data`,
+`nome`, UNIQUE su store+data) — negozio chiuso, trattati esattamente come la domenica nel
+generatore (`generateShiftsMD` in `generator.ts`): tutti riposo, niente assegnazione. Per
+Carlo (unico dipendente a distribuzione dinamica delle ore, non a pattern fisso), i festivi
+Lun-Ven vengono esclusi dal calcolo di `distribuisciOre` (`distribuisciOreConFestivi`) e le
+sue ore si ridistribuiscono sui restanti giorni feriali della settimana — un festivo di
+sabato invece lo riguarda come tutti gli altri, perché il sabato non fa parte di quella
+redistribuzione dinamica.
+TOT settimanale (`manager/page.tsx`): il target per il colore verde/rosso si riduce
+esattamente delle ore che il dipendente avrebbe lavorato nei festivi di quella settimana
+(cerca lo stesso giorno della settimana in un'altra data del mese senza festivo/assenza,
+usa quelle ore come riferimento — esatto nella maggior parte dei casi, dato che i pattern
+sono fissi per giorno della settimana). Non maschera ASSENZE REALI non legate al festivo:
+testato con Carlo, che quella settimana aveva sia il festivo di sabato SIA un permesso reale
+martedì — il TOT resta correttamente rosso per il permesso, il festivo da solo non lo
+avrebbe fatto scattare.
+Cella tabella: stesso stile della domenica (sfondo viola) + nome breve della festività sotto
+la data, cella non cliccabile (negozio chiuso, nessuna modifica manuale).
+Maia (`maia-chat/route.ts`): la lista festivi è iniettata nel system prompt — non propone
+mai turni in quei giorni.
+**SQL eseguito**: `_SQL_festivi.sql` (root del repo) — crea la tabella (FK su `stores`, non
+`turni_stores` come nella bozza iniziale) e semina le 12 festività 2026, Pasqua/Pasquetta
+verificate con l'algoritmo di Meeus (5-6 aprile).
+**Testato in produzione**: rigenerato Agosto 2026 completo — tutti i 13 dipendenti in
+riposo il 15 agosto (Ferragosto, che quest'anno cade di sabato), TOT settimanale corretto
+per chi non aveva altre assenze, Maia risponde correttamente "negozio chiuso" per il 15
+agosto.

@@ -701,6 +701,18 @@ export async function POST(req: NextRequest) {
       : ''
   }
 
+  let festiviText = ''
+  if (storeId) {
+    const { data: festivi } = await supabaseAdmin
+      .from('turni_festivi')
+      .select('data, nome')
+      .eq('store_id', storeId)
+      .order('data')
+    if (festivi && festivi.length > 0) {
+      festiviText = `\nGIORNI FESTIVI (negozio chiuso, nessun turno, esclusi dal budget ore — trattati esattamente come la domenica):\n${festivi.map((f: any) => `- ${f.data}: ${f.nome}`).join('\n')}\nNON proporre mai turni in questi giorni.\n`
+    }
+  }
+
   let configText = ''
   let config: any = null
   if (storeId) {
@@ -721,6 +733,7 @@ ${dataContext}
 
 ${context ?? ''}
 ${configText}
+${festiviText}
 ${regoleCustomText}
 ${saldiText}
 

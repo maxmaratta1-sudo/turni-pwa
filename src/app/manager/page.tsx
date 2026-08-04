@@ -180,6 +180,7 @@ export default function ManagerPage() {
   const [modalSaving, setModalSaving] = useState(false)
   const [modalTipoAssenza, setModalTipoAssenza] = useState('P')
   const [modalOreParziali, setModalOreParziali] = useState<string>('')
+  const [festiviMap, setFestiviMap] = useState<Record<string, string>>({})
   const [storicoAssenze, setStoricoAssenze] = useState<Unavailability[]>([])
   const [loadingStorico, setLoadingStorico] = useState(false)
   const [ferieSaldi, setFerieSaldi] = useState<Record<string, FerieSaldo>>({})
@@ -253,6 +254,12 @@ export default function ManagerPage() {
         .select('*').eq('store_id', storeId!).eq('attivo', true).order('nome')
       if (empErr) { setError(`employees: ${empErr.message}`); setLoading(false); return }
       setEmployees(sortEmployees(emps || [], isMD))
+
+      if (isMD) {
+        const { data: festiviData } = await supabase.from('turni_festivi')
+          .select('data, nome').eq('store_id', storeId!)
+        setFestiviMap(Object.fromEntries((festiviData || []).map((f: any) => [f.data, f.nome])))
+      }
 
       if (isMD && emps && emps.length > 0) {
         const { data: saldi } = await supabase.from('ferie_saldo')
@@ -639,6 +646,53 @@ Puoi:
         return d >= start && d <= sunday
       })
       .reduce((sum, g) => sum + oreLavorateGiorno(empId, g.data), 0)
+  }
+
+  /** Stima quante ore avrebbe lavorato `emp` in un giorno festivo se non lo fosse stato —
+   * cerca lo stesso giorno della settimana (dow) in un'altra data dello stesso mese, non
+   * festiva e senza assenza, con un turno effettivamente assegnato, e usa quelle ore come
+   * riferimento (i pattern sono fissi per giorno della settimana per quasi tutti i
+   * dipendenti MD, quindi è un valore esatto nella maggior parte dei casi). Fallback:
+   * media (ore_contratto / 6) se non trova nessun giorno di confronto. */
+  function oreAttesePerGiornoFestivo(emp: Employee, dataFestivo: string): number {
+    const dow = new Date(dataFestivo + 'T00:00:00').getDay()
+    for (const g of giorni) {
+      if (g.data === dataFestivo) continue
+      const d = new Date(g.data + 'T00:00:00')
+      if (d.getDay() !== dow) continue
+      if (festiviMap[g.data]) continue
+      if (hasUnavailability(emp.id, g.data)) continue
+      const shift = getShift(emp.id, g.data)
+      const ore = getOreDisplay(shift?.tipo ?? 'riposo', shift)
+      if (ore > 0) return ore
+    }
+    return emp.ore_settimanali / 6
+  }
+
+  /** Target ore settimanale per il colore del TOT — ridotto esattamente delle ore che
+   * `emp` avrebbe lavorato nei festivi di questa settimana (come la domenica, non deve
+   * mai abbassare artificialmente il contratto atteso). Eccezione: per Carlo, un festivo
+   * Lun-Ven NON riduce il target perché il generatore ridistribuisce già le sue ore sui
+   * giorni feriali rimanenti (vedi distribuisciOreConFestivi in generator.ts) — ma un
+   * festivo di SABATO sì, perché il sabato non fa parte di quella redistribuzione
+   * dinamica (per lui come per tutti gli altri). */
+  function targetSettimana(emp: Employee, sundayData: string): number {
+    if (!isMD) return emp.ore_settimanali
+    const sunday = new Date(sundayData + 'T00:00:00')
+    const start = new Date(sunday)
+    start.setDate(start.getDate() - 6)
+    const isCarlo = emp.nome.trim() === 'Carlo'
+    const festiviRilevanti = giorni.filter(g => {
+      const d = new Date(g.data + 'T00:00:00')
+      if (d < start || d > sunday) return false
+      if (d.getDay() === 0) return false
+      if (!festiviMap[g.data]) return false
+      if (isCarlo && d.getDay() !== 6) return false // festivo Lun-Ven di Carlo → già ridistribuito
+      return true
+    })
+    if (festiviRilevanti.length === 0) return emp.ore_settimanali
+    const oreDaTogliere = festiviRilevanti.reduce((sum, g) => sum + oreAttesePerGiornoFestivo(emp, g.data), 0)
+    return Math.max(0, emp.ore_settimanali - oreDaTogliere)
   }
 
   /** True se il dipendente ha usato Ferie (F) in uno dei 7 giorni che finiscono con `sundayData`. */
@@ -1156,11 +1210,13 @@ Puoi:
                   ))}
                   {giorniOrdinati.map(g => {
                     const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
+                    const nomeFestivo = isMD ? festiviMap[g.data] : undefined
                     return (
                       <Fragment key={g.data}>
-                        <th className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica ? 'bg-red-50 text-red-400' : 'text-gray-600'} ${inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''}`}>
+                        <th className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica || nomeFestivo ? 'bg-red-50 text-red-400' : 'text-gray-600'} ${inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''}`}>
                           <div className="text-xs">{g.giorno}</div>
                           <div className="text-xs text-gray-400">{g.num}</div>
+                          {nomeFestivo && <div className="text-xs text-purple-500">{nomeFestivo}</div>}
                         </th>
                         {isMD && g.domenica && (
                           <th className="p-2 text-center font-semibold text-gray-700 bg-gray-50 min-w-16">TOT</th>
@@ -1190,8 +1246,9 @@ Puoi:
                       const shift = getShift(emp.id, g.data)
                       const tipo = shift?.tipo || 'riposo'
                       const isPermesso = hasUnavailability(emp.id, g.data)
-                      const domenicaBloccata = g.domenica && !isMD
-                      const cellBg = g.domenica ? (isMD ? 'bg-purple-50' : 'bg-red-50') : ''
+                      const nomeFestivo = isMD ? festiviMap[g.data] : undefined
+                      const domenicaBloccata = (g.domenica && !isMD) || !!nomeFestivo
+                      const cellBg = g.domenica || nomeFestivo ? (isMD ? 'bg-purple-50' : 'bg-red-50') : ''
                       const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
                       const bordoSettimana = inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''
 
@@ -1246,7 +1303,7 @@ Puoi:
                         <Fragment key={g.data}>
                           {dayCell}
                           {showTot && (
-                            <td className={`p-1 text-center text-xs font-bold ${totColor(tot, emp.ore_settimanali)}`}>
+                            <td className={`p-1 text-center text-xs font-bold ${totColor(tot, targetSettimana(emp, g.data))}`}>
                               <div>{tot}h</div>
                               {haUsatoFerie && ferieRimanenti !== null && (
                                 <div className="text-[10px] font-normal text-gray-500">F:{ferieRimanenti.toFixed(0)}g</div>

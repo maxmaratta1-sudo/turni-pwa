@@ -156,6 +156,17 @@ async function loadTurniConfig(storeId: string): Promise<any> {
   return data.config
 }
 
+/** Giorni festivi italiani (turni_festivi) per lo store — trattati come domenica:
+ * negozio chiuso, nessun turno, esclusi dal budget ore. Ritorna un Set di date
+ * YYYY-MM-DD per lookup rapido nel loop giorni. */
+async function loadFestivi(storeId: string): Promise<Set<string>> {
+  const { data } = await supabaseAdmin
+    .from('turni_festivi')
+    .select('data')
+    .eq('store_id', storeId)
+  return new Set((data ?? []).map((f: any) => f.data))
+}
+
 function findDip(config: any, nome: string): any {
   const target = nome.trim().toLowerCase()
   return (config?.dipendenti ?? []).find((d: any) => (d.nome ?? '').trim().toLowerCase() === target) ?? null
@@ -189,6 +200,19 @@ function distribuisciOre(oreRimanenti: number, giorni: number, min: number, max:
     result.push(oreGiorno)
     rimanenti -= oreGiorno
   }
+  return result
+}
+
+/** Come distribuisciOre, ma su una settimana Lun-Ven (5 slot) dove alcuni weekday
+ * (0=Lun..4=Ven) sono festivi — quei giorni ricevono 0 ore, il totale si ridistribuisce
+ * sui restanti giorni feriali validi. Se l'intera settimana Lun-Ven è festiva (caso
+ * estremo, non atteso), ritorna tutti zero invece di dividere per zero. */
+function distribuisciOreConFestivi(oreRimanenti: number, min: number, max: number, festiviIdx: Set<number>): number[] {
+  const validIdx = [0, 1, 2, 3, 4].filter(i => !festiviIdx.has(i))
+  const result = [0, 0, 0, 0, 0]
+  if (validIdx.length === 0) return result
+  const valori = distribuisciOre(oreRimanenti, validIdx.length, min, max)
+  validIdx.forEach((idx, i) => { result[idx] = valori[i] ?? 0 })
   return result
 }
 
@@ -336,9 +360,24 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
 
   const storeId = employees[0].store_id
   const config = await loadTurniConfig(storeId)
+  const festiviSet = await loadFestivi(storeId)
 
   const giorni = getDaysInMonth(anno, mese)
   const shifts: Omit<Shift, 'id' | 'created_at'>[] = []
+
+  // Indici weekday (0=Lun..4=Ven) festivi per ogni settimana ISO del mese — servono a
+  // Carlo (distribuzione dinamica delle ore) per non allocare ore su un giorno chiuso.
+  const festiviIdxPerSettimana: Record<number, Set<number>> = {}
+  for (const g of giorni) {
+    const dow = g.getDay()
+    if (dow === 0) continue // domenica già esclusa a parte
+    const dStr = formatDate(g)
+    if (!festiviSet.has(dStr)) continue
+    const settimana = getIsoWeek(g)
+    const weekdayIdx = dow - 1
+    if (!festiviIdxPerSettimana[settimana]) festiviIdxPerSettimana[settimana] = new Set()
+    festiviIdxPerSettimana[settimana].add(weekdayIdx)
+  }
 
   const unavailMap: Record<string, Set<string>> = {}
   for (const u of unavailabilities) {
@@ -364,7 +403,9 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
   }
 
   // Piano ore Lun-Ven per dipendenti a distribuzione variabile (Carlo), ricalcolato
-  // ogni volta che cambia settimana ISO.
+  // ogni volta che cambia settimana ISO. Se la settimana ha un festivo, quel giorno
+  // riceve 0 ore e il totale si ridistribuisce sui restanti giorni feriali validi —
+  // il budget contrattuale non scende per colpa del festivo.
   const pianoSettimanale: Record<string, { settimana: number; oreGiorni: number[] }> = {}
   function getPianoGiorno(emp: Employee, dip: any, settimana: number, weekdayIdx: number, oreSettimanaliFeriali: number): number {
     const key = emp.id
@@ -372,7 +413,8 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
     const min = MIN_ORE_PER_CONTRATTO[emp.ore_settimanali] ?? 4
     let piano = pianoSettimanale[key]
     if (!piano || piano.settimana !== settimana) {
-      piano = { settimana, oreGiorni: distribuisciOre(oreSettimanaliFeriali, 5, min, max) }
+      const festiviIdx = festiviIdxPerSettimana[settimana] ?? new Set<number>()
+      piano = { settimana, oreGiorni: distribuisciOreConFestivi(oreSettimanaliFeriali, min, max, festiviIdx) }
       pianoSettimanale[key] = piano
     }
     return piano.oreGiorni[weekdayIdx] ?? 0
@@ -384,8 +426,8 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
     const settimana = getIsoWeek(giorno)
     const weekdayIdx = dayOfWeek - 1 // 0=Lun..4=Ven (Sabato=5 non usato qui)
 
-    // ── Domenica: riposo per tutti — nessuna assegnazione automatica.
-    if (dayOfWeek === 0) {
+    // ── Domenica o festivo: riposo per tutti — negozio chiuso, nessuna assegnazione.
+    if (dayOfWeek === 0 || festiviSet.has(dataStr)) {
       for (const emp of employees) {
         shifts.push({ schedule_id: scheduleId, employee_id: emp.id, data: dataStr, tipo: 'riposo' })
       }
