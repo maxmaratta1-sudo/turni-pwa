@@ -324,6 +324,11 @@ export default function ManagerPage() {
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
       setError(`Errore generazione settimana: ${data.error ?? res.statusText}`)
+    } else {
+      // Esce dalla modalità "editing settimana" dopo una generazione riuscita — il bordo
+      // blu segue sempre settimanaSelezionata, quindi resettandola sparisce di conseguenza
+      // (in caso di errore resta selezionata, per permettere di vedere cosa è fallito/riprovare).
+      setSettimanaSelezionata('')
     }
     await loadData()
     setLoading(false)
@@ -513,7 +518,9 @@ Puoi:
     const body = employees.map(emp => {
       const row: string[] = [emp.nome]
       giorniDaEsportare.forEach(g => {
-        if (hasUnavailability(emp.id, g.data)) {
+        if (isMD && festiviMap[g.data]) {
+          row.push('FEST')
+        } else if (hasUnavailability(emp.id, g.data)) {
           row.push(getAssenzaCode(emp.id, g.data))
         } else {
           const shift = getShift(emp.id, g.data)
@@ -536,6 +543,8 @@ Puoi:
       didParseCell: (data) => {
         if (data.section === 'body' && data.column.index > 0) {
           const val = data.cell.raw as string
+          // Festivo — priorità massima, prevale su assenze/turni (viola, come la cella in tabella).
+          if (val === 'FEST') { data.cell.styles.fillColor = [237, 233, 254]; return }
           // Assenze — sempre lettera, indipendentemente da MD/Stroili
           if (['P', 'F', 'R', 'MT'].includes(val)) { data.cell.styles.fillColor = [254, 243, 199]; return }
           // 'M' è ambiguo: assenza "Malattia" per MD, ma turno "Mattina" per Stroili
@@ -1252,7 +1261,14 @@ Puoi:
                       const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
                       const bordoSettimana = inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''
 
-                      const dayCell = isPermesso ? (() => {
+                      const dayCell = nomeFestivo ? (
+                        <td className={`p-1 text-center ${cellBg} ${bordoSettimana}`}>
+                          <span title={nomeFestivo}
+                            className="inline-block px-1 py-0.5 rounded text-xs font-bold bg-purple-100 text-purple-700">
+                            FEST
+                          </span>
+                        </td>
+                      ) : isPermesso ? (() => {
                         const assenzaCode = getAssenzaCode(emp.id, g.data)
                         const colore = ASSENZA_COLOR[assenzaCode] ?? 'bg-orange-100 text-orange-800'
                         return (

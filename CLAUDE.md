@@ -148,3 +148,20 @@ produzione (Damiana, agosto 2026): prima del fix aveva 3 record (`2026-08-15` Fe
 `2026-08-16` domenica, `2026-08-31`) — dopo il fix il bottone mostra correttamente "1
 giorno" (solo il 31, l'unico realmente selezionabile), e cliccando un altro giorno valido
 sale a "2" in sync perfetto con le celle rosse.
+
+**🐛 Bug trovati e corretti — priorità FEST e bordo settimana in editing (4 agosto 2026)**:
+1. La cella tabella manager e l'export PDF (Mese e Settimana condividono la stessa funzione
+   `exportPDF`) decidevano cosa mostrare controllando PRIMA le assenze (`hasUnavailability`)
+   e mai i festivi — un record di assenza residuo su un giorno diventato festivo (scenario
+   reale, vedi bug sopra) mostrava P/F/M/R/MT invece di FEST. Fix: controllo festivo ora in
+   testa a entrambe le funzioni (priorità: FEST > assenza > turno > riposo), etichetta "FEST"
+   viola sia in tabella sia nel PDF.
+2. Il bordo blu "settimana in editing" segue `settimanaSelezionata` — dopo `generaSettimana()`
+   quello stato non veniva mai resettato, quindi il bordo restava (comportamento in realtà
+   coerente col codice, ma non con l'aspettativa: dopo aver generato, si esce dalla modalità
+   editing). Fix: `setSettimanaSelezionata('')` dopo una generazione riuscita (resta invariato
+   in caso di errore, per poter vedere/riprovare la settimana che ha fallito).
+**Non verificato via click nel browser** (pagina manager richiede login email/password reale,
+non un secret semplice — nessuna credenziale disponibile, e non ho aggirato il gate scrivendo
+`localStorage` manualmente). Verificato solo per revisione di codice: entrambi i fix sono
+correzioni dirette e circoscritte, nessuna logica ambigua.
