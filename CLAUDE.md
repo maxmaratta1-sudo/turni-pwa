@@ -50,7 +50,19 @@ Maia (`src/app/api/maia-chat/route.ts`). Il generatore carica la config una volt
 chiamata, non ad ogni assegnazione.
 
 **Alternanza Max/Romeo**: letta da `turni_alternanza` (stesso meccanismo di `chiMattina`
-in maia-chat/route.ts) — garantisce sincronia tra generatore e Maia.
+in maia-chat/route.ts) — garantisce sincronia tra generatore e Maia. **Simmetrica** (4
+agosto 2026): Romeo alterna mattina/pomeriggio esattamente come Max, stessa logica,
+stessa lettura di `alternanza`. Rimossa la regola precedente "Romeo sempre mattina,
+scarico merce Lun/Mer/Ven fisso" (era `regola_assoluta` in `turni_config`, ora `null`
+per Romeo) — lo scarico merce non è più un vincolo legato a una persona specifica, lo
+copre chiunque sia in turno mattina quei giorni. Romeo mantiene però il proprio monte-ore
+giornaliero da contratto (28h: 5/4/5/4/5 nei feriali + sabato di aggiustamento 5-6h) — solo
+la direzione mattina/pomeriggio segue l'alternanza, non gli orari esatti di Max (30h, 5h/die
+fissa Legge 104). **Le assenze di uno dei due non influenzano MAI il turno dell'altro** —
+ogni dipendente viene elaborato in un'iterazione indipendente del generatore; l'alternanza
+è calcolata una volta a settimana dalla `settimana_riferimento` fissa, mai da "chi ha
+coperto cosa" la settimana precedente. Verificato con test end-to-end (agosto 2026, vedi
+sotto) e con la rigenerazione completa di Agosto 2026.
 
 **Bug corretto — `getWeekIndex` confine di settimana**: `getWeekIndex` calcola i confini
 di settimana a blocchi di 7 giorni dal 1° gennaio, che nel 2026 è un giovedì — quindi
@@ -85,6 +97,7 @@ dati validi. Il prompt di Opus può essere raffinato in un giro successivo.
 **Bug trovati e corretti durante il test (agosto 2026)**:
 1. Alternanza Max/Romeo che cambiava a metà settimana (vedi bug `getWeekIndex` sopra) — corretto ancorando al lunedì lato generatore.
 2. Sabato delle cassiere 22h con inizio mattina flessibile (08/09/10/11) accorciava la durata del turno invece di spostare solo l'inizio (durata = 13:00 − inizio invece di 5h fisse) — corretto fissando la durata a 5h e lasciando variare solo l'orario di inizio.
+3. (4 agosto 2026) Romeo era hardcoded a "sempre mattina" nel generatore, ignorando `alternanza` — asimmetrico rispetto a Max, che invece la legge correttamente. Non era il bug "Romeo si sposta per coprire Max" originariamente sospettato (quel pattern non esiste da nessuna parte nel codice — le assenze sono già isolate per dipendente), ma una regola diversa e più vecchia (scarico merce fisico) che Giacomo ha confermato non essere più necessaria. Corretto rendendo simmetrico il ramo Romeo in `generateShiftsMDWeek`, rimossa l'esclusione di Romeo da `correggiChiusura` (pass R7), aggiornato `turni_config` (regola_assoluta → null) e i commenti in `maia-chat/route.ts`. Testato con Max assente reale in produzione (settimana 10-15 agosto): Romeo è rimasto sul turno pomeriggio programmato per tutta la settimana, invariato.
 
 Aggiunto un controllo di sicurezza post-generazione (`verificaBudgetSettimanale` in
 generator.ts) che logga un warning se il totale ore settimanale generato non combacia

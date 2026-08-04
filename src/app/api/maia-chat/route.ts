@@ -288,8 +288,10 @@ function minGiornoPerContratto(oreSettimanali: number): number {
 
 /** Per i 28h (Romeo/Cristina/Stefania) e le cassiere 22h: trova automaticamente il giorno feriale della
  * stessa settimana da ridurre per compensare un turno domenicale appena assegnato, senza
- * sforare le 28h contrattuali. Romeo (scarico merce) non tocca mai Lun/Mer/Ven. Ritorna
- * solo una PROPOSTA testuale — l'applicazione avviene dopo conferma esplicita di Giacomo. */
+ * sforare le 28h contrattuali. Romeo recupera solo su Lun/Mer/Ven perché sono i suoi
+ * giorni da 5h (bilanciano esattamente le ore domenicali) — non è più legato allo scarico
+ * merce, è puro bilanciamento ore. Ritorna solo una PROPOSTA testuale — l'applicazione
+ * avviene dopo conferma esplicita di Giacomo. */
 async function trovaBilanciamentoDomenica(
   scheduleId: string,
   emp: { id: string; nome: string; ore_settimanali: number },

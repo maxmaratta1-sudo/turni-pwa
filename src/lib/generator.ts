@@ -433,36 +433,36 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
         }
       }
 
-      // Max/Romeo — alternanza settimanale AB, letta da turni_alternanza (sync con Maia).
+      // Max/Romeo — alternanza settimanale AB simmetrica, letta da turni_alternanza
+      // (sync con Maia). Romeo alterna mattina/pomeriggio esattamente come Max — lo
+      // scarico merce Lun/Mer/Ven non è più un vincolo fisso legato a Romeo, viene
+      // gestito da chiunque sia in turno mattina quei giorni (nessuna logica dedicata
+      // qui). Romeo mantiene però il proprio monte-ore giornaliero da contratto (28h,
+      // distribuito 5/4/5/4/5 nei feriali + sabato di aggiustamento) — solo la
+      // direzione mattina/pomeriggio segue l'alternanza, non gli orari esatti di Max.
       else if (dip.alternanza?.gruppo === 'AB') {
         const alternanza = await getAlternanzaSettimana(dataStr)
-        const isMax = nome === 'Max'
+        const mattinaOra = alternanza.mattina === nome
 
-        if (isMax) {
-          const mattinaOra = alternanza.mattina === 'Max'
+        if (nome === 'Max') {
           const slot = mattinaOra ? dip.pattern_standard.mattina : dip.pattern_standard.pomeriggio
           tipo = mattinaOra ? 'mattina_corta' : 'pomeriggio_corto'
           orario = orarioFromSlug(slot.orario)
         } else {
-          // Romeo: sempre mattina (scarico merce fisico Lun/Mer/Ven), regola_assoluta.
-          // L'"alternanza" con Max riguarda solo la direzione di Max, non Romeo stesso —
-          // il pattern_standard di Romeo non ha mai una variante pomeriggio.
-          if (dayOfWeek === 1 || dayOfWeek === 3 || dayOfWeek === 5) {
-            const slot = dip.pattern_standard[['','lunedi','martedi','mercoledi','giovedi','venerdi','sabato'][dayOfWeek]]
-            tipo = 'mattina'
-            orario = orarioFromSlug(slot.orario) // 5h fisse — regola_assoluta, mai toccare
-          } else if (dayOfWeek === 2 || dayOfWeek === 4) {
-            const slot = dip.pattern_standard[dayOfWeek === 2 ? 'martedi' : 'giovedi']
-            tipo = 'mattina'
-            orario = orarioFromSlug(slot.orario)
-          } else {
+          // Romeo: ore giornaliere dal proprio pattern_standard (invariate), direzione
+          // (mattina/pomeriggio) dall'alternanza settimanale — stesso principio di Max.
+          let ore: number
+          if (dayOfWeek === 6) {
             // Sabato — aggiustamento finale: 28h - ore feriali fisse (23h) = 5h, con
             // flessibilità fino a max_ore_giorno (6h, B risolto: JSON ha ragione).
             const oreFeriali = 5 + 4 + 5 + 4 + 5
-            const oreSabato = Math.min(getMaxOreGiorno(dip), Math.max(5, emp.ore_settimanali - oreFeriali))
-            tipo = 'mattina'
-            orario = orarioMattina(oreSabato)
+            ore = Math.min(getMaxOreGiorno(dip), Math.max(5, emp.ore_settimanali - oreFeriali))
+          } else {
+            const giornoKey = ['', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi'][dayOfWeek]
+            ore = dip.pattern_standard[giornoKey]?.ore ?? 4
           }
+          tipo = mattinaOra ? 'mattina' : 'pomeriggio'
+          orario = mattinaOra ? orarioMattina(ore) : orarioPomeriggio(ore)
         }
       }
 
@@ -688,8 +688,7 @@ export async function generateShiftsMDWeek(params: GenerateWeekParams): Promise<
 /** R7 — Chiusura 20:00: copertura minima da config (regole_generali.copertura_chiusura).
  * Pass di correzione post-generazione: se un giorno non raggiunge la copertura minima,
  * converte turni mattina di cassiere (esclusi non_cassiere, chi ha flessibilita "Nessuna",
- * Yuri per la fascia obbligatoria, e Romeo nei suoi giorni di scarico merce) in pomeriggio
- * a parità di ore già assegnate. */
+ * e Yuri per la fascia obbligatoria) in pomeriggio a parità di ore già assegnate. */
 function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[], config: any): void {
   const perGiorno: Record<string, Omit<Shift, 'id' | 'created_at'>[]> = {}
   for (const s of shifts) {
@@ -705,7 +704,6 @@ function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees:
     let chiusura = dayShifts.filter(s => s.ora_fine === '20:00').length
     if (chiusura >= minRichiesto) continue
 
-    const dayOfWeek = new Date(data + 'T00:00:00').getDay()
     const candidati = dayShifts
       .filter(s => {
         const emp = employees.find(e => e.id === s.employee_id)
@@ -716,8 +714,6 @@ function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees:
           || (dip?.flessibilita ?? '').toLowerCase().includes('nessuna')
           || nome === 'Yuri' // presenza fissa 13-16, mai spostare
         if (esclusoStrutturale) return false
-        // Romeo: Lun/Mer/Ven sono scarico merce, regola assoluta — mai convertire.
-        if (nome === 'Romeo' && (dayOfWeek === 1 || dayOfWeek === 3 || dayOfWeek === 5)) return false
         return s.tipo === 'mattina' && s.ora_fine !== '20:00'
       })
       .sort((a, b) => oreFromOrario(b.ora_inizio, b.ora_fine) - oreFromOrario(a.ora_inizio, a.ora_fine))
