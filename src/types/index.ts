@@ -55,6 +55,7 @@ export interface Unavailability {
   motivo?: string
   tipo_assenza?: string   // 'P' | 'F' | 'R' | 'M' | 'MT' — default 'P'
   inserito_da?: string    // chi ha registrato l'assenza (default 'manager')
+  ore_parziali?: number | null // solo per tipo_assenza='P': permesso a ore, turno accorciato invece di sparire
   created_at?: string
 }
 

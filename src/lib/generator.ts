@@ -219,6 +219,23 @@ export function oreFromOrario(inizio?: string | null, fine?: string | null): num
   return (hf * 60 + mf - (hi * 60 + mi)) / 60
 }
 
+/** Permesso a ore (assenza parziale): accorcia il turno togliendo `oreParziali` dall'inizio
+ * (il dipendente entra più tardi, esce alla stessa ora) — es. 08/13 (5h) - 2h → 10/13 (3h).
+ * Ritorna null se non c'è nulla da ridurre (turno assente/invalido, o le ore richieste
+ * coprono l'intero turno o più — in quel caso è un permesso a giornata intera, non parziale). */
+export function calcolaTurnoRidotto(
+  oraInizio?: string | null,
+  oraFine?: string | null,
+  oreParziali?: number | null
+): { ora_inizio: string; ora_fine: string } | null {
+  if (!oraInizio || !oraFine || !oreParziali || oreParziali <= 0) return null
+  const oreTotali = oreFromOrario(oraInizio, oraFine)
+  if (oreParziali >= oreTotali) return null
+  const [h, m] = oraInizio.split(':').map(Number)
+  const nuovaOraInizio = `${String(h + oreParziali).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+  return { ora_inizio: nuovaOraInizio, ora_fine: oraFine }
+}
+
 // ── Alternanza Max/Romeo — STESSO meccanismo di src/app/api/maia-chat/route.ts
 // (funzione chiMattina), letto dalla tabella `turni_alternanza`: garantisce che
 // generatore e Maia calcolino sempre la stessa risposta per la stessa settimana,

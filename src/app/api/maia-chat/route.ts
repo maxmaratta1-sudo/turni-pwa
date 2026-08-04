@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabaseAdmin } from '@/lib/supabase'
 import { ORARI_TURNO_MD, TurnoTipo } from '@/types'
-import { oreFromOrario, ORE_28H_FERIALI } from '@/lib/generator'
+import { oreFromOrario, ORE_28H_FERIALI, calcolaTurnoRidotto } from '@/lib/generator'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -86,6 +86,10 @@ const tools: Anthropic.Tool[] = [
           type: 'string',
           enum: ['F', 'P', 'R', 'M', 'MT'],
           description: 'F=Ferie, P=Permesso, R=Recupero, M=Malattia, MT=Maternità',
+        },
+        ore_parziali: {
+          type: 'number',
+          description: 'SOLO per tipo_assenza=P: numero di ore di permesso, se è un permesso a ore invece che a giornata intera (es. "2 ore di permesso" → 2). Il turno del giorno si accorcia di quelle ore (entra più tardi) invece di sparire, e si scalano solo quelle ore dal saldo permessi. Omettere per permesso a giornata intera.',
         },
         motivo: { type: 'string', description: 'Motivo opzionale' },
       },
@@ -521,6 +525,13 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     const tipoAssenza: string = input.tipo_assenza
     if (!Array.isArray(dates) || dates.length === 0) return 'Errore: nessuna data specificata.'
 
+    // Permesso a ore: turno accorciato (entra più tardi) invece di sparire — si scala
+    // solo il numero di ore indicato, non l'intero turno.
+    const oreParziali: number | null =
+      tipoAssenza === 'P' && typeof input.ore_parziali === 'number' && input.ore_parziali > 0
+        ? input.ore_parziali
+        : null
+
     let deltaFerieGiorni = 0
     let deltaPermessiOre = 0
 
@@ -533,8 +544,10 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
         .eq('data', d)
         .maybeSingle()
 
+      const turnoRidotto = oreParziali ? calcolaTurnoRidotto(existingShift?.ora_inizio, existingShift?.ora_fine, oreParziali) : null
+
       if (tipoAssenza === 'P') {
-        deltaPermessiOre += oreFromOrario(existingShift?.ora_inizio, existingShift?.ora_fine)
+        deltaPermessiOre += oreParziali ?? oreFromOrario(existingShift?.ora_inizio, existingShift?.ora_fine)
       }
       if (tipoAssenza === 'F') deltaFerieGiorni += 1
 
@@ -547,12 +560,23 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
         tipo_assenza: tipoAssenza,
         motivo: input.motivo || null,
         inserito_da: 'maia',
+        ore_parziali: oreParziali,
       })
 
-      await supabaseAdmin.from('shifts').upsert(
-        { schedule_id: ctx.scheduleId, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null },
-        { onConflict: 'schedule_id,employee_id,data' }
-      )
+      if (turnoRidotto) {
+        // Permesso a ore valido su un turno esistente: accorcia invece di azzerare.
+        // UPDATE (non upsert) — turnoRidotto è già garantito null se non esiste un turno
+        // valido da accorciare (vedi calcolaTurnoRidotto), e "tipo" è NOT NULL: un upsert
+        // che lo omette fallisce silenziosamente se mai tentasse un vero insert.
+        await supabaseAdmin.from('shifts')
+          .update({ ora_inizio: turnoRidotto.ora_inizio, ora_fine: turnoRidotto.ora_fine })
+          .eq('schedule_id', ctx.scheduleId).eq('employee_id', emp.id).eq('data', d)
+      } else {
+        await supabaseAdmin.from('shifts').upsert(
+          { schedule_id: ctx.scheduleId, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null },
+          { onConflict: 'schedule_id,employee_id,data' }
+        )
+      }
     }
 
     let avviso = ''

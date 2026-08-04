@@ -151,6 +151,7 @@ interface Unavailability {
   motivo: string | null
   tipo_assenza?: string | null
   inserito_da?: string | null
+  ore_parziali?: number | null
   created_at?: string
 }
 
@@ -178,6 +179,7 @@ export default function ManagerPage() {
   const [modalSaved, setModalSaved] = useState(false)
   const [modalSaving, setModalSaving] = useState(false)
   const [modalTipoAssenza, setModalTipoAssenza] = useState('P')
+  const [modalOreParziali, setModalOreParziali] = useState<string>('')
   const [storicoAssenze, setStoricoAssenze] = useState<Unavailability[]>([])
   const [loadingStorico, setLoadingStorico] = useState(false)
   const [ferieSaldi, setFerieSaldi] = useState<Record<string, FerieSaldo>>({})
@@ -221,8 +223,9 @@ export default function ManagerPage() {
     setModalSelected(new Set(dates))
     const firstMotivo = unavailabilities.find(u => u.employee_id === dettaglioEmp.id)?.motivo
     setModalMotivo(firstMotivo ?? '')
-    const firstTipo = unavailabilities.find(u => u.employee_id === dettaglioEmp.id)?.tipo_assenza
-    setModalTipoAssenza(firstTipo ?? 'P')
+    const firstRecord = unavailabilities.find(u => u.employee_id === dettaglioEmp.id)
+    setModalTipoAssenza(firstRecord?.tipo_assenza ?? 'P')
+    setModalOreParziali(firstRecord?.ore_parziali ? String(firstRecord.ore_parziali) : '')
     setModalSaved(false)
 
     // Storico assenze completo (tutti i mesi, non solo lo schedule corrente)
@@ -618,7 +621,9 @@ Puoi:
   // usate dall'algoritmo in generator.ts (che è invece corretto).
 
   function oreLavorateGiorno(empId: string, data: string): number {
-    if (hasUnavailability(empId, data)) return 0 // assenza = 0h lavorate
+    const u = unavailabilities.find(x => x.employee_id === empId && x.data === data)
+    // Permesso a ore: il turno è accorciato, non azzerato — conta le ore effettivamente lavorate.
+    if (u && !u.ore_parziali) return 0 // assenza a giornata intera = 0h lavorate
     const shift = getShift(empId, data)
     return getOreDisplay(shift?.tipo ?? 'riposo', shift)
   }
@@ -676,13 +681,20 @@ Puoi:
     const newFDate = new Set(modalTipoAssenza === 'F' ? nuoveDate : [])
     const deltaFerieGiorni = newFDate.size - oldFDate.size
 
-    const oldPDate = prevRecords.filter(u => u.tipo_assenza === 'P').map(u => u.data)
+    // Permesso a ore: se specificato, si scalano solo quelle ore (non il turno intero).
+    const oreParzialiNum = modalOreParziali.trim() !== '' ? parseFloat(modalOreParziali) : null
+
+    const oldPRecords = prevRecords.filter(u => u.tipo_assenza === 'P')
+    const oldPDate = oldPRecords.map(u => u.data)
     const newPDate = modalTipoAssenza === 'P' ? nuoveDate : []
     const addedP = newPDate.filter(d => !oldPDate.includes(d))
     const removedP = oldPDate.filter(d => !newPDate.includes(d))
     const deltaPermessiOre =
-      addedP.reduce((sum, d) => sum + oreFromOrario(getShift(dettaglioEmp.id, d)?.ora_inizio, getShift(dettaglioEmp.id, d)?.ora_fine), 0) -
-      removedP.reduce((sum, d) => sum + oreFromOrario(getShift(dettaglioEmp.id, d)?.ora_inizio, getShift(dettaglioEmp.id, d)?.ora_fine), 0)
+      addedP.reduce((sum, d) => sum + (oreParzialiNum ?? oreFromOrario(getShift(dettaglioEmp.id, d)?.ora_inizio, getShift(dettaglioEmp.id, d)?.ora_fine)), 0) -
+      removedP.reduce((sum, d) => {
+        const vecchio = oldPRecords.find(u => u.data === d)
+        return sum + (vecchio?.ore_parziali ?? oreFromOrario(getShift(dettaglioEmp.id, d)?.ora_inizio, getShift(dettaglioEmp.id, d)?.ora_fine))
+      }, 0)
 
     const res = await fetch('/api/unavailabilities', {
       method: 'POST',
@@ -693,6 +705,7 @@ Puoi:
         dates: nuoveDate,
         motivo: modalMotivo,
         tipo_assenza: modalTipoAssenza,
+        ore_parziali: oreParzialiNum,
         inserito_da: 'manager',
       }),
     })
@@ -773,17 +786,19 @@ Puoi:
     if (oreSettimanali === 22) return [
       ...base,
       '08/11', '09/12', '10/13', // mattina 3h
-      '09/13', '10/14',           // mattina 4h
+      '09/13', '10/14', '11/15', // mattina 4h
       '08/13',                    // mattina 5h
+      '08/14',                    // mattina 6h (entro max_ore_giorno=6)
       '17/20',                    // pomeriggio 3h
       '16/20',                    // pomeriggio 4h
       '15/20',                    // pomeriggio 5h
+      '14/20',                    // pomeriggio 6h (entro max_ore_giorno=6)
       ...ORARI_TURNO_BREVE,
     ]
 
     if (oreSettimanali === 28) return [
       ...base,
-      '08/12', '09/13', '10/14', // mattina 4h
+      '08/12', '09/13', '10/14', '11/15', // mattina 4h
       '08/13', '09/14',           // mattina 5h
       '08/14',                    // mattina 6h
       '16/20',                    // pomeriggio 4h
@@ -794,6 +809,7 @@ Puoi:
 
     if (oreSettimanali === 35) return [
       ...base,
+      '11/15',                    // mattina 4h
       '08/13', '09/14',           // mattina 5h
       '08/14',                    // mattina 6h
       '15/20',                    // pomeriggio 5h
@@ -1425,6 +1441,22 @@ Puoi:
                     <option value="MT">MT — Maternità</option>
                   </select>
                 </div>
+
+                {modalTipoAssenza === 'P' && (
+                  <div className="mt-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Ore di permesso (lascia vuoto per giornata intera)
+                    </label>
+                    <input type="number" min="1" max="8" placeholder="es. 2"
+                      className="w-full border rounded-lg px-3 py-2 text-sm"
+                      value={modalOreParziali}
+                      onChange={e => { setModalOreParziali(e.target.value); setModalSaved(false) }} />
+                    <p className="text-xs text-gray-400 mt-1">
+                      Se specificato, il turno del giorno si accorcia (entra più tardi) invece di sparire —
+                      si scalano solo queste ore dal saldo permessi, applicato a tutti i giorni selezionati.
+                    </p>
+                  </div>
+                )}
 
                 <div className="mt-4">
                   <label className="block text-sm font-medium text-gray-700 mb-1">Motivo (opzionale)</label>
