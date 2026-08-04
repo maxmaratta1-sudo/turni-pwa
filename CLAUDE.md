@@ -130,3 +130,21 @@ verificate con l'algoritmo di Meeus (5-6 aprile).
 riposo il 15 agosto (Ferragosto, che quest'anno cade di sabato), TOT settimanale corretto
 per chi non aveva altre assenze, Maia risponde correttamente "negozio chiuso" per il 15
 agosto.
+
+**🐛 Bug trovato e corretto — pagina dipendente, conteggio giorni bottone (4 agosto 2026)**:
+`src/app/dipendente/[token]/page.tsx` mostrava "Invia N giorni" con N diverso dai giorni
+evidenziati in rosso nel calendario. Causa reale (confermata sui dati di produzione, non le
+3 ipotesi originali — niente Set duplicato, nessuna data "fantasma" fuori mese): la cella
+del calendario dava priorità allo stile "domenica" (grigio) su quello "selezionato" (rosso)
+nel ternario di `CalGrid` — un record `unavailabilities` residuo per una domenica (comune:
+ogni dipendente in produzione aveva `2026-08-16`, una domenica, già marcato) veniva contato
+in `selectedDates.size` ma non renderizzato in rosso, perché la domenica è disabilitata al
+click ma non esclusa dal Set caricato da `loadData()`. Stesso rischio latente per i festivi,
+non ancora gestiti in questa pagina (mancava del tutto — solo il lato manager li aveva).
+Fix: `loadData()` ora filtra domenica E festivi (`turni_festivi`, fetchati per la prima
+volta anche qui) fuori da `selectedDates` al caricamento — non solo non selezionabili al
+click, ma esclusi a monte dal conteggio anche se già presenti nel DB da prima. Verificato in
+produzione (Damiana, agosto 2026): prima del fix aveva 3 record (`2026-08-15` Ferragosto,
+`2026-08-16` domenica, `2026-08-31`) — dopo il fix il bottone mostra correttamente "1
+giorno" (solo il 31, l'unico realmente selezionabile), e cliccando un altro giorno valido
+sale a "2" in sync perfetto con le celle rosse.

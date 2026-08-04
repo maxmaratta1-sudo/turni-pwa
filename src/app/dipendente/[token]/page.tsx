@@ -27,6 +27,7 @@ export default function DipendenteePage() {
   const [loading, setLoading] = useState(true)
   const [conflitti, setConflitti] = useState<Record<string, string[]>>({})
   const [ultimoGiornoToccato, setUltimoGiornoToccato] = useState<string | null>(null)
+  const [festiviMap, setFestiviMap] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (token) loadData()
@@ -72,13 +73,32 @@ export default function DipendenteePage() {
     setSchedule(sched)
     setResolvedScheduleId(sched?.id ?? null)
 
+    // Festivi (negozio chiuso, non selezionabili) — stesso trattamento della domenica.
+    let festivi: Record<string, string> = {}
+    if (data.employee?.store_id) {
+      const { data: festiviData } = await sb.from('turni_festivi')
+        .select('data, nome').eq('store_id', data.employee.store_id)
+      festivi = Object.fromEntries((festiviData || []).map((f: any) => [f.data, f.nome]))
+      setFestiviMap(festivi)
+    }
+
     // Carica unavailabilities con lo schedule risolto
     if (sched?.id) {
       const { data: unavRes } = await sb.from('unavailabilities')
         .select('*')
         .eq('employee_id', data.employee.id)
         .eq('schedule_id', sched.id)
-      setSelectedDates(new Set((unavRes || []).map((u: any) => u.data)))
+      // Esclude domenica/festivi dal conteggio: sono giorni non selezionabili (negozio
+      // chiuso), un record residuo per una di queste date (es. inserito prima che il
+      // giorno diventasse festivo, o da un flusso che non rispetta l'esclusione) non deve
+      // gonfiare il numero mostrato nel bottone senza comparire evidenziato in rosso.
+      const dateValide = (unavRes || [])
+        .map((u: any) => u.data)
+        .filter((d: string) => {
+          const dow = new Date(d + 'T00:00:00').getDay()
+          return dow !== 0 && !festivi[d]
+        })
+      setSelectedDates(new Set(dateValide))
       // Carica motivo se c'è un solo motivo comune (prendi il primo)
       const firstMotivo = unavRes?.[0]?.motivo
       if (firstMotivo) setMotivo(firstMotivo)
@@ -149,7 +169,7 @@ export default function DipendenteePage() {
           <div className="grid grid-cols-7 gap-1 text-center text-xs text-gray-400 mb-2">
             {['L','M','M','G','V','S','D'].map((d,i) => <div key={i}>{d}</div>)}
           </div>
-          <CalGrid giorni={giorni} selected={selectedDates} onToggle={toggleDate} conflitti={conflitti} />
+          <CalGrid giorni={giorni} selected={selectedDates} onToggle={toggleDate} conflitti={conflitti} festivi={festiviMap} />
         </div>
 
         {giornoConConflitto && (
@@ -199,11 +219,12 @@ export default function DipendenteePage() {
   )
 }
 
-function CalGrid({ giorni, selected, onToggle, conflitti }: {
+function CalGrid({ giorni, selected, onToggle, conflitti, festivi }: {
   giorni: ReturnType<typeof getDays>,
   selected: Set<string>,
   onToggle: (d: string) => void,
-  conflitti?: Record<string, string[]>
+  conflitti?: Record<string, string[]>,
+  festivi?: Record<string, string>
 }) {
   if (!giorni.length) return null
   // Fix timezone: parse come data locale aggiungendo T00:00:00
@@ -216,17 +237,19 @@ function CalGrid({ giorni, selected, onToggle, conflitti }: {
       {giorni.map(g => {
         const haConflitto = !!conflitti?.[g.data]?.length
         const isSelected = selected.has(g.data)
+        const nomeFestivo = festivi?.[g.data]
+        const nonSelezionabile = g.domenica || !!nomeFestivo
         return (
-          <button key={g.data} onClick={() => !g.domenica && onToggle(g.data)}
-            disabled={g.domenica}
-            title={haConflitto ? `${conflitti![g.data].join(', ')} ${conflitti![g.data].length === 1 ? 'ha' : 'hanno'} già richiesto questo giorno` : undefined}
+          <button key={g.data} onClick={() => !nonSelezionabile && onToggle(g.data)}
+            disabled={nonSelezionabile}
+            title={nomeFestivo ? nomeFestivo : haConflitto ? `${conflitti![g.data].join(', ')} ${conflitti![g.data].length === 1 ? 'ha' : 'hanno'} già richiesto questo giorno` : undefined}
             className={`relative aspect-square rounded-lg text-sm font-medium transition flex items-center justify-center
-              ${g.domenica ? 'text-gray-300 cursor-not-allowed' :
+              ${nonSelezionabile ? 'text-gray-300 cursor-not-allowed' :
                 isSelected && haConflitto ? 'bg-orange-500 text-white' :
                 isSelected ? 'bg-red-500 text-white' :
                 'hover:bg-gray-100 text-gray-700'}`}>
             {g.num}
-            {!isSelected && haConflitto && (
+            {!isSelected && haConflitto && !nonSelezionabile && (
               <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-orange-500" />
             )}
           </button>
