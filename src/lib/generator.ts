@@ -322,18 +322,91 @@ function direzioneSabatoFormula(nome: string, dataSabato: string): 'mattina' | '
   return base === 'mattina' ? 'pomeriggio' : 'mattina'
 }
 
-// ── Rotazione giornaliera cassiere 22h (invariata — la config conferma solo
-// l'invariante 2 mattina + 2 pomeriggio, non contraddice questa implementazione).
-const PATTERN_COPPIE_22H: { mattina: string[]; pomeriggio: string[] }[] = [
-  { mattina: ['Angelica', 'Elisa'], pomeriggio: ['Damiana', 'Marilena'] },
-  { mattina: ['Damiana', 'Elisa'], pomeriggio: ['Angelica', 'Marilena'] },
-  { mattina: ['Angelica', 'Marilena'], pomeriggio: ['Damiana', 'Elisa'] },
-]
+// ── Cassiere 22h — 3 mattina + 3 pomeriggio a settimana (sabato incluso), 5 agosto 2026 ──
+// Regola confermata con Giacomo, sostituisce il vecchio PATTERN_COPPIE_22H (ciclo fisso
+// a 3 giorni, prevedibile e scollegato dai confini di settimana):
+// 1. Sabato: si inverte SEMPRE rispetto al sabato della settimana precedente per ogni
+//    cassiera (letto dal DB — stessa data, qualsiasi mese/schedule appartenga).
+// 2. Lun-Ven: liberi, nessun vincolo di ripetizione con la settimana precedente — solo il
+//    totale 3 mattina + 3 pomeriggio a settimana (Sab incluso) e il 2+2 giornaliero.
+// 3. Le coppie (chi è mattina insieme) variano da sola conseguenza della randomizzazione
+//    controllata nella distribuzione Lun-Ven (shuffle ad ogni generazione) — nessuno
+//    storico delle coppie tracciato esplicitamente, la variabilità è strutturale.
+//
+// Il sabato garantisce automaticamente 2+2 per induzione: se la settimana N ha esattamente
+// 2 cassiere in mattina il sabato, la settimana N+1 le inverte tutte — quindi le 2 che
+// erano mattina diventano pomeriggio e viceversa, restando sempre 2+2. Il seed sotto è
+// la settimana "zero" (nessun sabato precedente in DB) con 2+2 di partenza.
+const SEED_SABATO_22H: Record<string, 'mattina' | 'pomeriggio'> = {
+  Angelica: 'mattina', Damiana: 'mattina', Elisa: 'pomeriggio', Marilena: 'pomeriggio',
+}
 
-function isMattinaCassiere22Giornaliero(nome: string, dataStr: string): boolean {
-  const giorno = parseInt(dataStr.split('-')[2], 10)
-  const pattern = PATTERN_COPPIE_22H[(giorno - 1) % 3]
-  return pattern.mattina.includes(nome)
+/** Turno dell'ultimo sabato registrato per questo dipendente, indipendentemente dal
+ * mese/schedule di appartenenza (la data è una chiave di calendario globale) — null se
+ * non c'è nessun turno salvato quel giorno (prima settimana, o giorno non ancora generato). */
+async function getSabatoPrecedente(empId: string, monday: string): Promise<'mattina' | 'pomeriggio' | null> {
+  const sabatoPrec = new Date(monday + 'T00:00:00')
+  sabatoPrec.setDate(sabatoPrec.getDate() - 2) // lunedì della settimana corrente - 2gg = sabato precedente
+  try {
+    const { data } = await supabaseAdmin
+      .from('shifts')
+      .select('tipo')
+      .eq('employee_id', empId)
+      .eq('data', formatDate(sabatoPrec))
+      .maybeSingle()
+    if (data?.tipo === 'mattina' || data?.tipo === 'pomeriggio') return data.tipo
+    return null
+  } catch (err) {
+    console.error('getSabatoPrecedente error:', err)
+    return null
+  }
+}
+
+/** Distribuisce mattina/pomeriggio Lun-Ven per le cassiere 22h di una settimana, dato il
+ * fabbisogno residuo di ciascuna (2 mattina se sabato=mattina, 3 se sabato=pomeriggio, e
+ * viceversa per il pomeriggio) — garantendo sempre esattamente 2 mattina + 2 pomeriggio al
+ * giorno. Forza le scelte quando il fabbisogno residuo coincide con i giorni rimasti
+ * (altrimenti sforerebbe), sceglie a caso (shuffle) tra le libere per il resto — questa è
+ * la "randomizzazione controllata" che fa variare le coppie nel tempo invece di un pattern
+ * fisso e prevedibile. Ritorna, per ciascun nome, un array di 5 booleani (Lun..Ven, true
+ * = mattina). */
+function distribuisciCassiere22Settimana(
+  nomi: string[],
+  sabatoMattina: Record<string, boolean>
+): Record<string, boolean[]> {
+  const fabbisogno: Record<string, { mattina: number; pomeriggio: number }> = {}
+  for (const nome of nomi) {
+    fabbisogno[nome] = sabatoMattina[nome] ? { mattina: 2, pomeriggio: 3 } : { mattina: 3, pomeriggio: 2 }
+  }
+
+  const risultato: Record<string, boolean[]> = Object.fromEntries(nomi.map(n => [n, [] as boolean[]]))
+
+  for (let giorno = 0; giorno < 5; giorno++) {
+    const giorniRimastiInclusoOggi = 5 - giorno
+
+    const forzatiMattina = nomi.filter(n => fabbisogno[n].mattina > 0 && fabbisogno[n].mattina === giorniRimastiInclusoOggi)
+    const forzatiPomeriggio = nomi.filter(n => fabbisogno[n].mattina === 0)
+
+    let mattinaOggi = forzatiMattina.slice(0, 2)
+    let pomeriggioOggi = forzatiPomeriggio.slice(0, 2)
+    if (forzatiMattina.length > 2 || forzatiPomeriggio.length > 2) {
+      console.error('distribuisciCassiere22Settimana: stato inatteso (più di 2 forzati) — giorno', giorno, { forzatiMattina, forzatiPomeriggio })
+    }
+
+    const assegnati = new Set([...mattinaOggi, ...pomeriggioOggi])
+    const liberi = nomi.filter(n => !assegnati.has(n))
+    const shuffled = [...liberi].sort(() => Math.random() - 0.5)
+
+    for (const n of shuffled) {
+      if (mattinaOggi.length < 2) mattinaOggi.push(n)
+      else pomeriggioOggi.push(n)
+    }
+
+    for (const n of mattinaOggi) { fabbisogno[n].mattina--; risultato[n].push(true) }
+    for (const n of pomeriggioOggi) { fabbisogno[n].pomeriggio--; risultato[n].push(false) }
+  }
+
+  return risultato
 }
 
 // Orari di inizio mattina flessibili per le cassiere 22h (H — non più sempre 08:00).
@@ -418,6 +491,34 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
       pianoSettimanale[key] = piano
     }
     return piano.oreGiorni[weekdayIdx] ?? 0
+  }
+
+  // Cache settimanale cassiere 22h: direzione sabato (inversa della precedente) + la
+  // distribuzione Lun-Ven risultante, calcolate UNA VOLTA a settimana (ancorata al
+  // lunedì, stesso motivo dell'alternanza Max/Romeo sopra) e riusate per tutti i giorni
+  // e tutte le cassiere di quella settimana.
+  const cassiere22Cache: Record<string, { sat: Record<string, boolean>; lunVen: Record<string, boolean[]> }> = {}
+  async function getCassiera22Settimana(dataStr: string) {
+    const monday = getMonday(dataStr)
+    if (cassiere22Cache[monday]) return cassiere22Cache[monday]
+
+    const nomiCassiere22 = employees
+      .map(e => e.nome.trim())
+      .filter(nome => findDip(config, nome)?.alternanza?.gruppo === '22h')
+
+    const empByNome = new Map(employees.map(e => [e.nome.trim(), e]))
+    const sat: Record<string, boolean> = {}
+    for (const nome of nomiCassiere22) {
+      const emp = empByNome.get(nome)!
+      const precedente = await getSabatoPrecedente(emp.id, monday)
+      const direzione = precedente ? (precedente === 'mattina' ? 'pomeriggio' : 'mattina') : (SEED_SABATO_22H[nome] ?? 'mattina')
+      sat[nome] = direzione === 'mattina'
+    }
+
+    const lunVen = distribuisciCassiere22Settimana(nomiCassiere22, sat)
+    const risultato = { sat, lunVen }
+    cassiere22Cache[monday] = risultato
+    return risultato
   }
 
   for (const giorno of giorni) {
@@ -572,10 +673,12 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
         }
       }
 
-      // Cassiere 22h — rotazione giornaliera a coppie mattina/pomeriggio, ore da
-      // distribuzione, inizio mattina flessibile 08/09/10/11 (H).
+      // Cassiere 22h — 3 mattina + 3 pomeriggio a settimana (sabato incluso), sabato
+      // invertito rispetto al precedente, Lun-Ven variabile — ore da distribuzione,
+      // inizio mattina flessibile 08/09/10/11 (H). Vedi getCassiera22Settimana sopra.
       else if (dip.alternanza?.gruppo === '22h') {
-        const mattinaOra = isMattinaCassiere22Giornaliero(nome, dataStr)
+        const settimana22h = await getCassiera22Settimana(dataStr)
+        const mattinaOra = dayOfWeek === 6 ? (settimana22h.sat[nome] ?? false) : (settimana22h.lunVen[nome]?.[weekdayIdx] ?? false)
         if (dayOfWeek === 6) {
           // Sabato: durata FISSA a 5h (il budget settimanale la assume fissa — vedi
           // oreSettimanaliFeriali sotto). L'inizio flessibile (H) si applica solo ai
@@ -584,8 +687,6 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
           tipo = mattinaOra ? 'mattina' : 'pomeriggio'
           orario = mattinaOra ? orarioMattinaFlessibile(5) : orarioPomeriggio(5)
         } else {
-          const max = getMaxOreGiorno(dip)
-          const min = MIN_ORE_PER_CONTRATTO[emp.ore_settimanali] ?? 3
           const oreSettimanaliFeriali = Math.max(0, emp.ore_settimanali - 5) // sabato ~5h fisse
           const ore = getPianoGiorno(emp, dip, settimana, weekdayIdx, oreSettimanaliFeriali)
           if (ore <= 0) {

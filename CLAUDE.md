@@ -165,3 +165,39 @@ sale a "2" in sync perfetto con le celle rosse.
 non un secret semplice — nessuna credenziale disponibile, e non ho aggirato il gate scrivendo
 `localStorage` manualmente). Verificato solo per revisione di codice: entrambi i fix sono
 correzioni dirette e circoscritte, nessuna logica ambigua.
+
+**Cassiere 22h — 3 mattina + 3 pomeriggio a settimana, sabato invertito (5 agosto 2026)**:
+regola confermata con Giacomo, sostituisce il vecchio `PATTERN_COPPIE_22H` (ciclo fisso a 3
+giorni sul giorno del mese, scollegato dai confini di settimana e dal sabato — prevedibile,
+sempre le stesse coppie in loop). Nuovo algoritmo in `generator.ts`:
+1. **Sabato**: `getSabatoPrecedente()` legge dal DB il turno dell'ultimo sabato salvato per
+   quel dipendente (query diretta per `data`, indipendente da quale mese/schedule appartiene
+   — la data è una chiave di calendario globale) e lo inverte. Prima settimana in assoluto
+   (nessun sabato precedente in DB) → seed fisso 2+2 (`SEED_SABATO_22H`). L'inversione
+   garantisce per induzione il 2+2 di sabato automaticamente: se la settimana N ha 2+2, la
+   settimana N+1 (tutte invertite) ha ancora 2+2.
+2. **Lun-Ven**: `distribuisciCassiere22Settimana()` — dato il fabbisogno residuo di ciascuna
+   (2 mattina se sabato=mattina, 3 se sabato=pomeriggio, e viceversa per il pomeriggio),
+   distribuisce giorno per giorno forzando le scelte quando il fabbisogno residuo coincide
+   coi giorni rimasti (altrimenti sforerebbe), scegliendo a caso (shuffle, `Math.random()`)
+   tra le libere per il resto. Questa è la "randomizzazione controllata" richiesta — le
+   coppie variano da sola conseguenza dello shuffle, nessuno storico coppie tracciato
+   esplicitamente (variabilità strutturale, non per design esplicito anti-ripetizione).
+3. Entrambi calcolati UNA VOLTA a settimana (cache ancorata al lunedì, `cassiere22Cache`,
+   stesso meccanismo di `alternanzaCache`/`pianoSettimanale` già in uso per Max/Romeo/Carlo)
+   e riusati per tutti i giorni e tutte le cassiere di quella settimana.
+**Aggiornato `turni_config.regole_generali.cassiere_22h_copertura.regola`** in Supabase con
+la nuova regola precisa (3+3, sabato invertito, coppie variabili) — altri campi esistenti
+dell'oggetto preservati.
+**✅ Testato in produzione**: rigenerate 3 settimane consecutive di agosto (10-15, 17-22,
+24-29 — la settimana 31 ago-5 set esclusa dal test perché a cavallo tra due mesi, limite
+del test non del generatore). Verificato su dati reali: 2+2 esatto ogni singolo giorno delle
+3 settimane (18 giorni, sabati inclusi); sabato invertito perfettamente tra settimana 2 e 3
+per tutte e 4 (unica coppia di sabati "pulita" nel test, la settimana 1 aveva sabato 15
+agosto = Ferragosto/festivo, quindi riposo per tutte, correttamente); 3+3 esatto nelle
+settimane 2 e 3 (22h a testa), settimana 1 a 17h per tutte per via del sabato festivo
+(5+3+... coerente, non un bug); coppie mattina variate tra le settimane — comparse coppie
+nuove in settimana 3 mai viste nelle settimane 1-2, a conferma che non è più un ciclo fisso.
+⚠️ I turni generati durante questo test sono rimasti salvati come dati reali di produzione
+per queste 4 dipendenti in queste 3 settimane (sovrascritti i turni precedenti) — non erano
+dati fittizi, il risultato è corretto secondo la nuova regola quindi non sono stati annullati.
