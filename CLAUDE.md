@@ -201,3 +201,64 @@ nuove in settimana 3 mai viste nelle settimane 1-2, a conferma che non è più u
 ⚠️ I turni generati durante questo test sono rimasti salvati come dati reali di produzione
 per queste 4 dipendenti in queste 3 settimane (sovrascritti i turni precedenti) — non erano
 dati fittizi, il risultato è corretto secondo la nuova regola quindi non sono stati annullati.
+
+---
+
+## Sconto ore festivi (tabella fissa) + fascia centrale 12-14 + pannello Mezzogiorno (6 agosto 2026)
+
+**Sconto ore festivo — sostituita la vecchia logica** (mancante per i dipendenti a
+pattern fisso, "ridistribuzione a budget pieno" per Carlo/22h — vedi verifica del 5 agosto
+2026 sopra, che aveva trovato discrepanze reali su tutti i contratti). Nuova regola
+confermata da Max: sconto FISSO dal target settimanale per ogni festivo (feriale o sabato,
+indipendentemente da quante ore varrebbe normalmente quel giorno specifico):
+```
+22h → 3h    28h → 4h    30h (Max) → 5h    35h → 5h    36h → 6h    40h → 6h
+```
+(`SCONTO_FESTIVO_PER_CONTRATTO`, `generator.ts`). Rimossa `distribuisciOreConFestivi`
+("budget pieno non scende per colpa del festivo") — `getPianoGiorno` (Carlo, cassiere 22h)
+ora distribuisce le ore come se non ci fosse mai un festivo (esattamente come tutti gli
+altri dipendenti a pattern fisso), e una nuova funzione `applicaScontoFestivi()` (pass
+post-generazione, stesso pattern di `correggiChiusura`) applica lo sconto a TUTTI i
+dipendenti uniformemente: per ogni settimana con almeno un festivo, confronta il totale
+generato con l'atteso (`ore_contratto - sconto×numero_festivi`) e corregge la differenza
+allungando/accorciando UN turno mattina/pomeriggio "normale" quella settimana (mai i turni
+a orario fisso vincolato — Yuri 13-16 obbligatorio, Max Legge 104 mai oltre 5h/giorno — che
+restano fuori perché hanno tipo `yuri_full`/`yuri_pomeriggio`/`mattina_corta`/
+`pomeriggio_corto`, non `mattina`/`pomeriggio`). `verificaBudgetSettimanale` aggiornata per
+non dare più falsi allarmi nelle settimane con festivo (target atteso ora tiene conto dello
+sconto).
+**✅ Testato in produzione** (funzione pura, nessuna scrittura — festivo di test inserito,
+generato, poi rimosso): sabato di Ferragosto (2026-08-15, reale) e un festivo
+infrasettimanale di test (mercoledì 2026-09-09) — **discrepanza 0 per tutti i 13
+dipendenti attivi, entrambi gli scenari**, tabella rispettata esattamente indipendentemente
+da quante ore varrebbe normalmente il giorno colpito (es. sabato Ferragosto per le 22h
+scala solo 3h, non le 5h che varrebbe normalmente quel sabato — verificato).
+⚠️ **Nota tecnica trovata durante il test**: il client Supabase condiviso (`supabaseAdmin`)
+sembra avere risposte GET cache-ate da Next.js anche su route `force-dynamic` quando una
+insert e una successiva lettura avvengono nella STESSA request (osservato: dati non
+aggiornati/stale subito dopo un insert). Non ha impatto sul flusso reale (nell'app,
+aggiungere un festivo e generare i turni sono sempre due request separate), ma se in futuro
+si scrive codice che legge subito dopo aver scritto nella stessa request, usare un client
+dedicato con `fetch: (url, opts) => fetch(url, {...opts, cache: 'no-store'})` invece del
+`supabaseAdmin` condiviso.
+
+**Fascia centrale 12:00-14:00 — minimo 2 cassieri.** Yuri (`presenza_preferita` in config)
+copre già 13-16 quasi tutti i giorni ma questo da solo non copre l'intera fascia (Mar/Gio fa
+solo 13/16, manca 12-13) — serve sempre almeno un'altra cassiera con un turno "centrale" che
+copra 12-14 per intero (10/14, 11/15, 09/14, ecc.). Nuova funzione `correggiFasciaCentrale()`
+(stesso pattern di `correggiChiusura`, post-generazione): se il conteggio di chi si
+sovrappone alla fascia (anche parzialmente) è sotto il minimo, converte il turno di una
+cassiera candidata (mai Yuri, mai `non_cassiere`, mai flessibilità "Nessuna") in un orario
+centrale valido cercato in `config.legenda_orari` (stesse ore del turno originale quando
+possibile, altrimenti ±1/±2h entro il `max_ore_giorno`), preservando l'esclusione dei
+giorni festivi/domenica (nessun falso warning nei giorni di chiusura). Config aggiornata:
+`regole_generali.fascia_centrale_obbligatoria` (`inizio`, `fine`, `minimo_cassieri: 2`,
+`presenza_preferita: "Yuri"`).
+**✅ Testato in produzione**: verificata copertura ≥2 persone su tutti i giorni lavorativi
+di una settimana reale (7-12 settembre), festivi/domenica correttamente esclusi dal check.
+
+**Pannello "🕐 Mezzogiorno"** (`manager/page.tsx`) — stesso pattern UI del pannello
+"🔒 Chiusure" (pannello laterale destro, navigazione settimana con frecce ←/→). Per ogni
+giorno mostra chi si sovrappone alla fascia 12-14 (criterio identico al pannello Chiusure:
+qualunque sovrapposizione, non necessariamente copertura piena — coerente con l'esempio
+"Yuri (13/16) — solo 1 persona" fornito da Max), verde se ≥2 persone, rosso/warning se 0-1.

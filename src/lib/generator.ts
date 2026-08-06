@@ -190,6 +190,15 @@ function getMaxOreGiorno(dip: any, fallback = 6): number {
 
 const MIN_ORE_PER_CONTRATTO: Record<number, number> = { 22: 3, 28: 4, 30: 4, 35: 5, 36: 6, 40: 6 }
 
+/** R8 — Sconto ore per giorno festivo (feriale o sabato), tabella fissa per contratto
+ * (confermata da Max, 6 agosto 2026). Sostituisce la vecchia logica "ridistribuzione a
+ * budget pieno" (distribuisciOreConFestivi, rimossa): il target settimanale ora si
+ * RIDUCE di questo valore fisso per ogni festivo nella settimana, indipendentemente da
+ * quante ore varrebbe normalmente quel giorno specifico per quel dipendente — es. il
+ * sabato di Ferragosto per le 22h scala comunque solo 3h, non le 5h che varrebbe
+ * normalmente quel sabato. Applicata da applicaScontoFestivi() dopo la generazione. */
+const SCONTO_FESTIVO_PER_CONTRATTO: Record<number, number> = { 22: 3, 28: 4, 30: 5, 35: 5, 36: 6, 40: 6 }
+
 /** Distribuisce ore intere su N giorni, rispettando min/max giornaliero. */
 function distribuisciOre(oreRimanenti: number, giorni: number, min: number, max: number): number[] {
   const result: number[] = []
@@ -200,19 +209,6 @@ function distribuisciOre(oreRimanenti: number, giorni: number, min: number, max:
     result.push(oreGiorno)
     rimanenti -= oreGiorno
   }
-  return result
-}
-
-/** Come distribuisciOre, ma su una settimana Lun-Ven (5 slot) dove alcuni weekday
- * (0=Lun..4=Ven) sono festivi — quei giorni ricevono 0 ore, il totale si ridistribuisce
- * sui restanti giorni feriali validi. Se l'intera settimana Lun-Ven è festiva (caso
- * estremo, non atteso), ritorna tutti zero invece di dividere per zero. */
-function distribuisciOreConFestivi(oreRimanenti: number, min: number, max: number, festiviIdx: Set<number>): number[] {
-  const validIdx = [0, 1, 2, 3, 4].filter(i => !festiviIdx.has(i))
-  const result = [0, 0, 0, 0, 0]
-  if (validIdx.length === 0) return result
-  const valori = distribuisciOre(oreRimanenti, validIdx.length, min, max)
-  validIdx.forEach((idx, i) => { result[idx] = valori[i] ?? 0 })
   return result
 }
 
@@ -438,20 +434,6 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
   const giorni = getDaysInMonth(anno, mese)
   const shifts: Omit<Shift, 'id' | 'created_at'>[] = []
 
-  // Indici weekday (0=Lun..4=Ven) festivi per ogni settimana ISO del mese — servono a
-  // Carlo (distribuzione dinamica delle ore) per non allocare ore su un giorno chiuso.
-  const festiviIdxPerSettimana: Record<number, Set<number>> = {}
-  for (const g of giorni) {
-    const dow = g.getDay()
-    if (dow === 0) continue // domenica già esclusa a parte
-    const dStr = formatDate(g)
-    if (!festiviSet.has(dStr)) continue
-    const settimana = getIsoWeek(g)
-    const weekdayIdx = dow - 1
-    if (!festiviIdxPerSettimana[settimana]) festiviIdxPerSettimana[settimana] = new Set()
-    festiviIdxPerSettimana[settimana].add(weekdayIdx)
-  }
-
   const unavailMap: Record<string, Set<string>> = {}
   for (const u of unavailabilities) {
     if (!unavailMap[u.employee_id]) unavailMap[u.employee_id] = new Set()
@@ -475,10 +457,16 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
     return alternanzaCache[monday]
   }
 
-  // Piano ore Lun-Ven per dipendenti a distribuzione variabile (Carlo), ricalcolato
-  // ogni volta che cambia settimana ISO. Se la settimana ha un festivo, quel giorno
-  // riceve 0 ore e il totale si ridistribuisce sui restanti giorni feriali validi —
-  // il budget contrattuale non scende per colpa del festivo.
+  // Piano ore Lun-Ven per dipendenti a distribuzione variabile (Carlo, cassiere 22h),
+  // ricalcolato ogni volta che cambia settimana ISO. Non ha più awareness dei festivi
+  // qui: la distribuzione avviene come se la settimana fosse sempre completa (5 slot),
+  // esattamente come per ogni altro dipendente a pattern fisso — il giorno festivo
+  // diventa comunque 'riposo' più sotto nel loop principale (quindi le ore
+  // eventualmente pianificate su quel giorno vengono scartate). Lo sconto vero e
+  // proprio (tabella fissa per contratto, non proporzionale al pattern del giorno)
+  // viene applicato UNA VOLTA per tutti i dipendenti da applicaScontoFestivi() dopo
+  // la generazione — vedi SCONTO_FESTIVO_PER_CONTRATTO. Sostituisce la vecchia
+  // distribuisciOreConFestivi ("ridistribuzione a budget pieno", rimossa).
   const pianoSettimanale: Record<string, { settimana: number; oreGiorni: number[] }> = {}
   function getPianoGiorno(emp: Employee, dip: any, settimana: number, weekdayIdx: number, oreSettimanaliFeriali: number): number {
     const key = emp.id
@@ -486,8 +474,7 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
     const min = MIN_ORE_PER_CONTRATTO[emp.ore_settimanali] ?? 4
     let piano = pianoSettimanale[key]
     if (!piano || piano.settimana !== settimana) {
-      const festiviIdx = festiviIdxPerSettimana[settimana] ?? new Set<number>()
-      piano = { settimana, oreGiorni: distribuisciOreConFestivi(oreSettimanaliFeriali, min, max, festiviIdx) }
+      piano = { settimana, oreGiorni: distribuisciOre(oreSettimanaliFeriali, 5, min, max) }
       pianoSettimanale[key] = piano
     }
     return piano.oreGiorni[weekdayIdx] ?? 0
@@ -731,17 +718,118 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
   }
 
   correggiChiusura(shifts, employees, config)
+  correggiFasciaCentrale(shifts, employees, config, festiviSet)
+  applicaScontoFestivi(shifts, employees, config, festiviSet)
   verificaFasciaObbligatoria(shifts, config, giorni)
-  verificaBudgetSettimanale(shifts, employees)
+  verificaBudgetSettimanale(shifts, employees, festiviSet)
 
   return shifts
 }
 
+/** R8 — Applica lo sconto ore festivo (SCONTO_FESTIVO_PER_CONTRATTO) a TUTTI i
+ * dipendenti, indipendentemente da come vengono calcolate le loro ore giornaliere
+ * (pattern fisso o distribuzione dinamica). Passata post-generazione (come
+ * correggiChiusura): per ogni dipendente e settimana ISO con almeno un festivo
+ * (feriale o sabato, la domenica è già esclusa dal budget), confronta il totale
+ * ore effettivamente generato con l'atteso (ore_contratto - sconto×numero_festivi)
+ * e corregge la differenza allungando o accorciando UN turno mattina/pomeriggio
+ * "normale" di quella settimana — mai i turni a orario fisso vincolato da una
+ * regola assoluta (Yuri 13-16 obbligatorio, Max Legge 104 mai oltre 5h/giorno:
+ * questi hanno tipo yuri_full/yuri_pomeriggio/mattina_corta/pomeriggio_corto,
+ * esclusi perché il filtro qui sotto accetta solo tipo 'mattina'/'pomeriggio').
+ * Se nessun turno regolabile è trovato entro min/max contrattuale, logga un
+ * warning invece di forzare (stesso principio di verificaFasciaObbligatoria). */
+function applicaScontoFestivi(
+  shifts: Omit<Shift, 'id' | 'created_at'>[],
+  employees: Employee[],
+  config: any,
+  festiviSet: Set<string>
+): void {
+  const festiviPerSettimana: Record<number, number> = {}
+  for (const dStr of Array.from(festiviSet)) {
+    const d = new Date(dStr + 'T00:00:00')
+    if (d.getDay() === 0) continue // domenica già esclusa dal budget, non conta come sconto aggiuntivo
+    const settimana = getIsoWeek(d)
+    festiviPerSettimana[settimana] = (festiviPerSettimana[settimana] ?? 0) + 1
+  }
+  if (Object.keys(festiviPerSettimana).length === 0) return
+
+  const perEmpSettimana: Record<string, Record<number, Omit<Shift, 'id' | 'created_at'>[]>> = {}
+  for (const s of shifts) {
+    if (s.tipo === 'riposo' || s.tipo === 'domenica_lungo' || s.tipo === 'domenica_corto') continue
+    const settimana = getIsoWeek(new Date(s.data + 'T00:00:00'))
+    if (!festiviPerSettimana[settimana]) continue
+    perEmpSettimana[s.employee_id] ??= {}
+    perEmpSettimana[s.employee_id][settimana] ??= []
+    perEmpSettimana[s.employee_id][settimana].push(s)
+  }
+
+  for (const emp of employees) {
+    const sconto = SCONTO_FESTIVO_PER_CONTRATTO[emp.ore_settimanali]
+    if (sconto == null) {
+      console.warn(`[GENERATOR] ⚠️ ${emp.nome.trim()}: contratto ${emp.ore_settimanali}h assente da SCONTO_FESTIVO_PER_CONTRATTO — nessuno sconto festivo applicato, verificare tabella`)
+      continue
+    }
+    const perSettimana = perEmpSettimana[emp.id]
+    if (!perSettimana) continue
+
+    for (const [settStr, empShifts] of Object.entries(perSettimana)) {
+      const settimana = Number(settStr)
+      const numFestivi = festiviPerSettimana[settimana]
+      const scontoAtteso = sconto * numFestivi
+      const oreAttese = emp.ore_settimanali - scontoAtteso
+      const oreAttuali = empShifts.reduce((sum, s) => sum + oreFromOrario(s.ora_inizio, s.ora_fine), 0)
+      let diff = oreAttuali - oreAttese // >0 → togliere ore, <0 → aggiungere ore
+      if (diff === 0) continue
+
+      const dip = findDip(config, emp.nome.trim())
+      const isCassiera22 = dip?.alternanza?.gruppo === '22h'
+      const min = MIN_ORE_PER_CONTRATTO[emp.ore_settimanali] ?? 3
+      const max = getMaxOreGiorno(dip)
+
+      const candidati = empShifts
+        .filter(s => s.tipo === 'mattina' || s.tipo === 'pomeriggio')
+        .sort((a, b) => oreFromOrario(b.ora_inizio, b.ora_fine) - oreFromOrario(a.ora_inizio, a.ora_fine))
+
+      for (const s of candidati) {
+        if (diff === 0) break
+        const oreCorrenti = oreFromOrario(s.ora_inizio, s.ora_fine)
+        const oreNuove = Math.min(max, Math.max(min, oreCorrenti - diff))
+        const applicato = oreCorrenti - oreNuove
+        if (applicato === 0) continue
+        const isMattina = s.tipo === 'mattina'
+        const nuovoOrario = isMattina
+          ? (isCassiera22 ? orarioMattinaFlessibile(oreNuove) : orarioMattina(oreNuove))
+          : orarioPomeriggio(oreNuove)
+        s.ora_inizio = nuovoOrario.inizio
+        s.ora_fine = nuovoOrario.fine
+        diff -= applicato
+      }
+
+      if (diff !== 0) {
+        console.warn(`[GENERATOR] ⚠️ Sconto festivo non applicabile per intero a ${emp.nome.trim()} settimana ISO ${settimana}: differenza residua ${diff}h (nessun turno regolabile entro min/max) — verificare manualmente`)
+      }
+    }
+  }
+}
+
 /** Controllo di sicurezza (solo warning, non blocca): somma le ore settimanali
- * generate per ogni dipendente e segnala scostamenti da ore_contratto. Aggiunto
+ * generate per ogni dipendente e segnala scostamenti dal target atteso. Aggiunto
  * dopo aver trovato un bug reale in test (sabato 22h con inizio flessibile che
- * accorciava la durata invece di spostare solo l'inizio — vedi fix in questo file). */
-function verificaBudgetSettimanale(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[]): void {
+ * accorciava la durata invece di spostare solo l'inizio — vedi fix in questo file).
+ * Tiene conto dei festivi (R8): in una settimana con festivo il target atteso non
+ * è più ore_contratto ma ore_contratto - sconto×numero_festivi, altrimenti questo
+ * controllo darebbe un falso allarme ogni volta che applicaScontoFestivi ha
+ * correttamente ridotto il totale. */
+function verificaBudgetSettimanale(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[], festiviSet: Set<string>): void {
+  const festiviPerSettimana: Record<number, number> = {}
+  for (const dStr of Array.from(festiviSet)) {
+    const d = new Date(dStr + 'T00:00:00')
+    if (d.getDay() === 0) continue
+    const settimana = getIsoWeek(d)
+    festiviPerSettimana[settimana] = (festiviPerSettimana[settimana] ?? 0) + 1
+  }
+
   const perSettimanaPerDip: Record<string, Record<number, number>> = {}
   for (const s of shifts) {
     if (s.tipo === 'riposo' || s.tipo === 'domenica_lungo' || s.tipo === 'domenica_corto') continue
@@ -753,8 +841,11 @@ function verificaBudgetSettimanale(shifts: Omit<Shift, 'id' | 'created_at'>[], e
     const emp = employees.find(e => e.id === employeeId)
     if (!emp) continue
     for (const [settimana, ore] of Object.entries(perSettimana)) {
-      if (ore !== emp.ore_settimanali) {
-        console.warn(`[GENERATOR] ⚠️ ${emp.nome.trim()} settimana ISO ${settimana}: ${ore}h generate invece di ${emp.ore_settimanali}h (ore_contratto) — verificare manualmente`)
+      const numFestivi = festiviPerSettimana[Number(settimana)] ?? 0
+      const sconto = numFestivi > 0 ? (SCONTO_FESTIVO_PER_CONTRATTO[emp.ore_settimanali] ?? 0) * numFestivi : 0
+      const atteso = emp.ore_settimanali - sconto
+      if (ore !== atteso) {
+        console.warn(`[GENERATOR] ⚠️ ${emp.nome.trim()} settimana ISO ${settimana}: ${ore}h generate invece di ${atteso}h atteso (contratto ${emp.ore_settimanali}h${numFestivi > 0 ? `, ${numFestivi} festivo/i` : ''}) — verificare manualmente`)
       }
     }
   }
@@ -886,6 +977,95 @@ function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees:
       s.ora_inizio = nuovoOrario.inizio
       s.ora_fine = nuovoOrario.fine
       chiusura++
+    }
+  }
+}
+
+/** Cerca in config.legenda_orari uno slot che copra INTERAMENTE la fascia data (default
+ * 12:00-14:00) con lo stesso numero di ore del turno originale — se non esiste prova
+ * ±1/±2 ore entro il max_ore_giorno del dipendente, per non alterare troppo il monte-ore
+ * già assegnato (lo sconto festivi, se necessario, sistema comunque il totale dopo). */
+function trovaOrarioCentrale(
+  config: any,
+  ore: number,
+  dip: any,
+  fascia: { inizio: string; fine: string }
+): { inizio: string; fine: string } | null {
+  const legenda: { ore: number; orario: string }[] = config?.legenda_orari ?? []
+  const max = getMaxOreGiorno(dip)
+  const copreInteramente = (o: { inizio: string; fine: string }) => o.inizio <= fascia.inizio && o.fine >= fascia.fine
+  for (const delta of [0, 1, -1, 2, -2]) {
+    const target = ore + delta
+    if (target < 1 || target > max) continue
+    const match = legenda
+      .filter(l => l.ore === target)
+      .map(l => orarioFromSlug(l.orario))
+      .find(copreInteramente)
+    if (match) return match
+  }
+  return null
+}
+
+/** FIX 2 — Fascia centrale 12:00-14:00: minimo `minimo_cassieri` presenti (config
+ * regole_generali.fascia_centrale_obbligatoria). Yuri (presenza_preferita) copre già
+ * 13:00-16:00 quasi tutti i giorni, ma questo da solo non copre l'intera fascia 12-14
+ * (specialmente Mar/Gio, dove fa solo 13/16) — serve almeno un'altra cassiera con un
+ * turno "centrale" che copra 12-14 per intero. Pass di correzione post-generazione,
+ * stesso pattern di correggiChiusura: se il conteggio di chi SI SOVRAPPONE alla fascia
+ * (anche parzialmente, stesso criterio del pannello "Mezzogiorno") è sotto il minimo,
+ * converte il turno di una cassiera candidata (mai Yuri, mai non_cassiere, mai
+ * flessibilita "Nessuna") in un orario centrale valido, preservando le ore quando
+ * possibile. */
+function correggiFasciaCentrale(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[], config: any, festiviSet: Set<string>): void {
+  const fascia = config?.regole_generali?.fascia_centrale_obbligatoria
+  if (!fascia) return
+  const minimo = fascia.minimo_cassieri ?? 2
+
+  const perGiorno: Record<string, Omit<Shift, 'id' | 'created_at'>[]> = {}
+  for (const s of shifts) {
+    if (!perGiorno[s.data]) perGiorno[s.data] = []
+    perGiorno[s.data].push(s)
+  }
+
+  for (const [data, dayShifts] of Object.entries(perGiorno)) {
+    if (new Date(data + 'T00:00:00').getDay() === 0) continue // domenica non gestita da questa regola
+    if (festiviSet.has(data)) continue // negozio chiuso, nessuna copertura attesa
+
+    let overlap = dayShifts.filter(s =>
+      s.ora_inizio && s.ora_fine && s.ora_inizio < fascia.fine && s.ora_fine > fascia.inizio
+    )
+    if (overlap.length >= minimo) continue
+
+    const candidati = dayShifts
+      .filter(s => {
+        const emp = employees.find(e => e.id === s.employee_id)
+        if (!emp) return false
+        const nome = emp.nome.trim()
+        if (nome === fascia.presenza_preferita) return false // Yuri, mai spostare
+        const dip = findDip(config, nome)
+        const esclusoStrutturale = dip?.ruolo === 'non_cassiere'
+          || (dip?.flessibilita ?? '').toLowerCase().includes('nessuna')
+        if (esclusoStrutturale) return false
+        if (s.tipo !== 'mattina' && s.tipo !== 'pomeriggio') return false
+        const copreGia = s.ora_inizio! <= fascia.inizio && s.ora_fine! >= fascia.fine
+        return !copreGia
+      })
+      .sort((a, b) => oreFromOrario(b.ora_inizio, b.ora_fine) - oreFromOrario(a.ora_inizio, a.ora_fine))
+
+    for (const s of candidati) {
+      if (overlap.length >= minimo) break
+      const emp = employees.find(e => e.id === s.employee_id)!
+      const dip = findDip(config, emp.nome.trim())
+      const ore = oreFromOrario(s.ora_inizio, s.ora_fine)
+      const nuovoOrario = trovaOrarioCentrale(config, ore, dip, fascia)
+      if (!nuovoOrario) continue
+      s.ora_inizio = nuovoOrario.inizio
+      s.ora_fine = nuovoOrario.fine
+      overlap = [...overlap, s]
+    }
+
+    if (overlap.length < minimo) {
+      console.warn(`[GENERATOR] ⚠️ Fascia centrale ${fascia.inizio}-${fascia.fine} scoperta il ${data}: solo ${overlap.length}/${minimo} presenti dopo correzione — verificare manualmente`)
     }
   }
 }
