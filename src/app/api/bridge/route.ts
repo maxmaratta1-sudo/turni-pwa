@@ -211,7 +211,11 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    return NextResponse.json({ ok: true, messaggio: `${tipo_assenza} registrata per ${emp.nome}` })
+    // FIX 2 (7 agosto 2026): tipo_assenza resta "R" nel DB, ma il messaggio verso chi ha
+    // chiamato il bridge (es. maia-turni.ts in mangia-pwa2) deve dire "REC" per il
+    // Recupero — stessa disambiguazione di manager/page.tsx e maia-chat/route.ts.
+    const tipoAssenzaDisplay = tipo_assenza === 'R' ? 'REC' : tipo_assenza
+    return NextResponse.json({ ok: true, messaggio: `${tipoAssenzaDisplay} registrata per ${emp.nome}` })
   }
 
   return NextResponse.json({ error: 'Action non valida' }, { status: 400 })

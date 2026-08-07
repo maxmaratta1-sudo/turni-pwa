@@ -192,7 +192,7 @@ export default function DipendenteePage() {
               className="w-full border rounded-lg px-3 py-2 text-sm mb-3">
               <option value="P">P — Permesso</option>
               <option value="F">F — Ferie</option>
-              <option value="R">R — Recupero</option>
+              <option value="R">REC — Recupero</option>
               <option value="M">M — Malattia</option>
               <option value="MT">MT — Maternità</option>
             </select>

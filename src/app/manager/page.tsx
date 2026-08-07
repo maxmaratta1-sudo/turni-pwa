@@ -72,6 +72,15 @@ const ASSENZA_LABEL: Record<string, string> = {
   P: 'Permesso', F: 'Ferie', R: 'Recupero', M: 'Malattia', MT: 'Maternità',
 }
 
+// FIX 2 (7 agosto 2026, richiesta Giacomo): il DB continua a salvare "R" per il Recupero
+// (tipo_assenza invariato, nessuna migrazione dati necessaria) — ma "R" da sola era
+// ambigua con il Riposo normale. La lettera MOSTRATA (tabella, PDF, risposte Maia) ora è
+// sempre "REC" per il Recupero. Il Riposo normale non ha mai avuto una lettera (cella
+// vuota/turno normale, non un'assenza) — non serve toccarlo.
+function getAssenzaDisplay(code: string): string {
+  return code === 'R' ? 'REC' : code
+}
+
 const ASSENZA_COLOR: Record<string, string> = {
   F: 'bg-yellow-100 text-yellow-800',
   P: 'bg-orange-100 text-orange-800',
@@ -523,7 +532,7 @@ Puoi:
         if (isMD && festiviMap[g.data]) {
           row.push('FEST')
         } else if (hasUnavailability(emp.id, g.data)) {
-          row.push(getAssenzaCode(emp.id, g.data))
+          row.push(getAssenzaDisplay(getAssenzaCode(emp.id, g.data)))
         } else {
           const shift = getShift(emp.id, g.data)
           row.push(getTurnoDisplay(shift?.tipo || 'riposo', isMD, shift))
@@ -840,67 +849,30 @@ Puoi:
     }
   }
 
-  // Turni brevi (3h, casi eccezionali) — disponibili per tutti i dipendenti MD su richiesta di Giacomo.
-  const ORARI_TURNO_BREVE = ['11/14', '12/15', '13/16', '17/20']
+  // FIX 3 (7 agosto 2026, richiesta Giacomo): lista UNICA e completa di orari per la
+  // selezione manuale dal menu a cascata, uguale per TUTTI i dipendenti MD — prima era
+  // filtrata per contratto (oreSettimanali), il che impediva a Giacomo di scegliere
+  // manualmente un orario "fuori contratto" per gestire un'emergenza. I vincoli per
+  // contratto restano validi SOLO per la generazione automatica (generator.ts), MAI per
+  // questa selezione manuale. Ordinata cronologicamente per inizio poi fine.
+  const TUTTI_GLI_ORARI = [
+    '08/11', '08/12', '08/13', '08/14', '08/15', '08/16', '08/20',
+    '09/12', '09/13', '09/14', '09/17',
+    '10/13', '10/14', '10/15', '10/16', '10/18',
+    '11/14', '11/15', '11/16', '11/17',
+    '12/15', '12/16',
+    '13/16', '13/17',
+    '14/19', '14/20',
+    '15/20',
+    '16/20',
+    '17/20',
+  ]
 
-  /** Orari validi per cella MD, in base alle ore settimanali contrattuali del dipendente
-   * (evita che il click ciclico assegni un turno con più ore di quante ne consenta il contratto). */
-  function getOrariValidi(oreSettimanali: number): string[] {
-    const base = ['—'] // riposo sempre disponibile
-
-    if (oreSettimanali === 22) return [
-      ...base,
-      '08/11', '09/12', '10/13', // mattina 3h
-      '09/13', '10/14', '11/15', // mattina 4h
-      '08/13',                    // mattina 5h
-      '08/14',                    // mattina 6h (entro max_ore_giorno=6)
-      '17/20',                    // pomeriggio 3h
-      '16/20',                    // pomeriggio 4h
-      '15/20',                    // pomeriggio 5h
-      '14/20',                    // pomeriggio 6h (entro max_ore_giorno=6)
-      ...ORARI_TURNO_BREVE,
-    ]
-
-    if (oreSettimanali === 28) return [
-      ...base,
-      '08/12', '09/13', '10/14', '11/15', // mattina 4h
-      '08/13', '09/14',           // mattina 5h
-      '08/14',                    // mattina 6h
-      '16/20',                    // pomeriggio 4h
-      '15/20',                    // pomeriggio 5h
-      '14/20',                    // pomeriggio 6h
-      ...ORARI_TURNO_BREVE,
-    ]
-
-    if (oreSettimanali === 35) return [
-      ...base,
-      '11/15',                    // mattina 4h
-      '08/13', '09/14',           // mattina 5h
-      '08/14',                    // mattina 6h
-      '15/20',                    // pomeriggio 5h
-      '14/20',                    // pomeriggio 6h
-      ...ORARI_TURNO_BREVE,
-    ]
-
-    if (oreSettimanali === 30) return [
-      // Max: sempre 5h fisso
-      '08/13',  // mattina 5h
-      '14/19',  // pomeriggio 5h
-      '—',
-      ...ORARI_TURNO_BREVE,
-    ]
-
-    if (oreSettimanali === 36) return [
-      ...base,
-      '08/14', // mattina 6h standard
-      '14/20', // pomeriggio 6h
-      '08/16', // yuri full
-      '13/16', // yuri salumeria
-      ...ORARI_TURNO_BREVE,
-    ]
-
-    // Default
-    return [...base, '08/14', '14/20', '08/20', ...ORARI_TURNO_BREVE]
+  /** Orari validi per il popup cella MD — stessa lista completa per tutti i dipendenti,
+   * indipendentemente dal contratto (vedi nota FIX 3 sopra). Il parametro oreSettimanali
+   * non è più usato per filtrare, ma resta nella firma per non toccare il call site. */
+  function getOrariValidi(_oreSettimanali: number): string[] {
+    return ['—', ...TUTTI_GLI_ORARI]
   }
 
   /** Converte l'orario scelto nel popup ("HH/HH" o "—") nel tipo turno + ora_inizio/ora_fine.
@@ -1286,7 +1258,7 @@ Puoi:
                               disabled={domenicaBloccata}
                               title={`${ASSENZA_LABEL[assenzaCode]} — click per cambiare tipo`}
                               className={`inline-block px-1 py-0.5 rounded text-xs font-bold hover:opacity-80 disabled:cursor-not-allowed ${colore}`}>
-                              {assenzaCode}
+                              {getAssenzaDisplay(assenzaCode)}
                             </button>
                           </td>
                         )
@@ -1351,7 +1323,7 @@ Puoi:
               {isMD && <span className="text-pink-700">11/14, 12/15, 13/16, 17/20 = Turno breve (3h)</span>}
               <span><strong className="text-yellow-700">F</strong><span className="text-yellow-700"> = Ferie</span></span>
               <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
-              <span><strong className="text-yellow-700">R</strong><span className="text-yellow-700"> = Recupero</span></span>
+              <span><strong className="text-yellow-700">REC</strong><span className="text-yellow-700"> = Recupero</span></span>
               <span><strong className="text-red-700">M</strong><span className="text-red-700"> = Malattia</span></span>
               <span><strong className="text-yellow-700">MT</strong><span className="text-yellow-700"> = Maternità</span></span>
             </div>
@@ -1578,7 +1550,7 @@ Puoi:
                     className="w-full border rounded-lg px-3 py-2 text-sm">
                     <option value="P">P — Permesso</option>
                     <option value="F">F — Ferie</option>
-                    <option value="R">R — Recupero</option>
+                    <option value="R">REC — Recupero</option>
                     <option value="M">M — Malattia</option>
                     <option value="MT">MT — Maternità</option>
                   </select>

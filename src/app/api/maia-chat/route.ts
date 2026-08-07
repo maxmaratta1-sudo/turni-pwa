@@ -28,7 +28,7 @@ const tools: Anthropic.Tool[] = [
         },
         recupero_domenicale: {
           type: 'boolean',
-          description: 'true SOLO quando tipo="riposo" e stai applicando il riposo compensativo per un turno domenicale già confermato da Giacomo — registra anche una R (Recupero) in unavailabilities, non solo lo shift a riposo.',
+          description: 'true SOLO quando tipo="riposo" e stai applicando il riposo compensativo per un turno domenicale già confermato da Giacomo — registra anche una REC (Recupero, codice interno "R") in unavailabilities, non solo lo shift a riposo.',
         },
         ore: {
           type: 'number',
@@ -85,7 +85,7 @@ const tools: Anthropic.Tool[] = [
         tipo_assenza: {
           type: 'string',
           enum: ['F', 'P', 'R', 'M', 'MT'],
-          description: 'F=Ferie, P=Permesso, R=Recupero, M=Malattia, MT=Maternità',
+          description: 'F=Ferie, P=Permesso, R=Recupero, M=Malattia, MT=Maternità. Nota: internamente il codice resta sempre "R" per il Recupero, ma quando ne parli con Giacomo (conferme, riepiloghi) chiamalo sempre "REC", MAI "R" da sola — è ambigua col Riposo normale.',
         },
         ore_parziali: {
           type: 'number',
@@ -231,12 +231,21 @@ const isDomenicaTipo = (tipo: string) => tipo === 'domenica_lungo' || tipo === '
  * è sempre extra — compensata dal riposo nella settimana precedente, non conta mai nel
  * budget settimanale e non viene mai bloccata per eccesso ore. Il 'riposo' (anche quello
  * compensativo domenicale) RIDUCE sempre le ore — non va mai bloccato dal budget.
- * Ritorna un messaggio d'errore se sfora, altrimenti null. */
+ *
+ * `isEmergenza` (FIX 1, 7 agosto 2026 — richiesta Giacomo): quando Giacomo specifica un
+ * orario/ore ESPLICITO per il turno, questo è un comando emergenziale autorizzato che
+ * bypassa il budget standard — MAI bloccarlo. Prima di questo fix il controllo bloccava
+ * comunque qualsiasi sforamento anche con "ore" esplicito passato da Giacomo (l'"ore"
+ * override veniva usato solo per calcolare il totale con più precisione, non per saltare
+ * il controllo) — il tool restituiva un errore, ma a volte Maia rispondeva "fatto" lo
+ * stesso senza riportarlo fedelmente a Giacomo (vedi anche nota IMPORTANTE nel system
+ * prompt). Ritorna un messaggio d'errore se sfora E non è emergenza, altrimenti null. */
 async function verificaBudgetSettimanale(
-  scheduleId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string, oreOverride?: number
+  scheduleId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string, oreOverride?: number, isEmergenza?: boolean
 ): Promise<string | null> {
   if (isDomenicaTipo(tipo)) return null // domenica non conta mai nel budget, mai bloccata
   if (tipo === 'riposo') return null // il riposo riduce sempre le ore, non può mai sforare
+  if (isEmergenza) return null // comando esplicito di Giacomo con orario preciso — mai bloccato
 
   const monday = getMonday(data)
   const sunday = new Date(monday)
@@ -368,19 +377,39 @@ function assertNonDomenicaPerEsclusi(emp: { nome: string; turno_fisso?: string |
 }
 
 /** Mapping ore → tipo/orario reale per turni variabili (soprattutto cassiere 22h) — usato
- * quando Maia applica una proposta di riduzione ore precisa (es. bilanciamento domenica),
- * invece del lookup fisso per tipo che darebbe sempre le stesse ore. */
+ * quando Maia applica una proposta di riduzione ore precisa (es. bilanciamento domenica)
+ * O un comando emergenziale con ore esplicite (FIX 1, 7 agosto 2026), invece del lookup
+ * fisso per tipo che darebbe sempre le stesse ore.
+ *
+ * 🐛 Bug trovato e corretto (7 agosto 2026) — root cause reale del bug "Damiana 8/15":
+ * per ore diverse da 3/4/5 questa funzione cadeva SEMPRE nel default fisso 08:00-14:00
+ * (mattina) o 14:00-20:00 (pomeriggio), IGNORANDO silenziosamente il valore di "ore"
+ * richiesto — 6h era per puro caso identico al default, ma 7h (o qualsiasi valore >5)
+ * veniva silenziosamente troncato a 6h. Maia rispondeva "fatto, 08:00-15:00" ma il turno
+ * salvato era davvero 08:00-14:00 — non un fallimento di salvataggio, ma un salvataggio
+ * SBAGLIATO con conferma comunque positiva (stesso sintomo osservato da Giacomo). Fix:
+ * mattina ancorata a 08:00 (fine = 08:00+ore) e pomeriggio ancorato a 20:00
+ * (inizio = 20:00-ore) per QUALSIASI valore di ore oltre 3/4/5, non solo il caso
+ * standard — questo copre correttamente le emergenze con più ore del solito (7h, 8h...).
+ * ⚠️ Limite noto: se Giacomo specifica un orario con un inizio non standard (es. "10/17",
+ * non ancorato a 08:00/20:00), il tool riceve comunque solo "ore" (7) e assumerebbe
+ * 08:00-15:00 invece di 10:00-17:00 — il parametro "ore" non può rappresentare un inizio
+ * esplicito diverso dai due ancoraggi standard. Non risolto qui (fuori dallo scope del
+ * bug segnalato, che riguardava specificamente "8/15" — ancorato a 08:00): servirebbe
+ * estendere lo schema del tool con ora_inizio/ora_fine espliciti invece di solo "ore". */
 function oreToShiftType(ore: number, isMattina: boolean): { tipo: TurnoTipo; ora_inizio: string; ora_fine: string } {
   if (isMattina) {
     if (ore === 3) return { tipo: 'mattina_corta', ora_inizio: '10:00', ora_fine: '13:00' }
     if (ore === 4) return { tipo: 'mattina_corta', ora_inizio: '09:00', ora_fine: '13:00' }
     if (ore === 5) return { tipo: 'mattina_corta', ora_inizio: '08:00', ora_fine: '13:00' }
-    return { tipo: 'mattina', ora_inizio: '08:00', ora_fine: '14:00' }
+    const fineOra = 8 + ore
+    return { tipo: 'mattina', ora_inizio: '08:00', ora_fine: `${String(fineOra).padStart(2, '0')}:00` }
   }
   if (ore === 3) return { tipo: 'pomeriggio_corto', ora_inizio: '17:00', ora_fine: '20:00' }
   if (ore === 4) return { tipo: 'pomeriggio_corto', ora_inizio: '16:00', ora_fine: '20:00' }
   if (ore === 5) return { tipo: 'pomeriggio_corto', ora_inizio: '15:00', ora_fine: '20:00' }
-  return { tipo: 'pomeriggio', ora_inizio: '14:00', ora_fine: '20:00' }
+  const inizioOra = 20 - ore
+  return { tipo: 'pomeriggio', ora_inizio: `${String(inizioOra).padStart(2, '0')}:00`, ora_fine: '20:00' }
 }
 
 async function upsertShift(scheduleId: string, employeeId: string, data: string, tipo: TurnoTipo, oreOverride?: number) {
@@ -421,16 +450,32 @@ function eachDate(start: string, end: string): string[] {
 }
 
 async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<string> {
+  // Logging diagnostico temporaneo (7 agosto 2026) — per capire esattamente quali
+  // parametri Claude invia ai tool di modifica turno, dato un caso reale in cui la
+  // risposta testuale non corrispondeva ai parametri effettivamente inviati al tool.
+  if (toolName === 'update_shift' || toolName === 'update_shift_week') {
+    console.log(`[maia-chat] ${toolName} input:`, JSON.stringify(input))
+  }
   if (toolName === 'update_shift') {
     const emp = await findEmployee(input.employee_name, ctx.storeId)
     if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
     const blocco = assertNonDomenicaPerEsclusi(emp, input.tipo)
     if (blocco) return blocco
     const oreOverride: number | undefined = typeof input.ore === 'number' ? input.ore : undefined
-    const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, input.data, input.tipo, emp.ore_settimanali, emp.nome, oreOverride)
+    // FIX 1 (7 agosto 2026): "ore" esplicito in update_shift arriva SEMPRE da un comando
+    // preciso di Giacomo (mai calcolato automaticamente qui, a differenza di
+    // update_shift_week) — quindi la sua sola presenza è già la firma di un'emergenza
+    // autorizzata, vedi verificaBudgetSettimanale.
+    const isEmergenza = oreOverride !== undefined
+    const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, input.data, input.tipo, emp.ore_settimanali, emp.nome, oreOverride, isEmergenza)
     if (erroreOre) return erroreOre
     const { error } = await upsertShift(ctx.scheduleId, emp.id, input.data, input.tipo, oreOverride)
-    if (error) return `Errore salvataggio turno: ${error.message}`
+    if (error) {
+      // FIX 1 STEP 3: logging esplicito lato server per ogni fallimento di salvataggio —
+      // prima passava inosservato, visibile solo se qualcuno controllava manualmente i log.
+      console.error(`[maia-chat] update_shift FALLITO — ${emp.nome} ${input.data} tipo=${input.tipo} ore=${oreOverride ?? 'std'}:`, error)
+      return `Errore salvataggio turno: ${error.message}`
+    }
     if (isDomenicaTipo(input.tipo)) {
       const oreDomenica = input.tipo === 'domenica_lungo' ? 5 : 3
       if (emp.ore_settimanali === 28 || emp.ore_settimanali === 22) {
@@ -451,7 +496,7 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
         inserito_da: 'maia',
       })
       if (errRecupero) return `Turno impostato a riposo, ma errore salvataggio recupero: ${errRecupero.message}`
-      return `OK: ${emp.nome} riposa il ${input.data} per compensare le ore domenicali (registrato come R — Recupero).`
+      return `OK: ${emp.nome} riposa il ${input.data} per compensare le ore domenicali (registrato come REC — Recupero).`
     }
     return `OK: turno di ${emp.nome} il ${input.data} impostato su "${input.tipo}".`
   }
@@ -466,26 +511,41 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     let modificati = 0
     let saltati = 0
     let bloccatiPerOre = 0
+    let falliti = 0
     const isCristinaStefania = emp.ore_settimanali === 28 && emp.nome !== 'Romeo'
     for (const d of dates) {
       const dayOfWeek = new Date(d + 'T00:00:00').getDay()
       if (dayOfWeek === 0 && !isTipoDomenica) { saltati++; continue }
       // Un "ore" esplicito di Giacomo ha SEMPRE priorità sulle regole automatiche sotto —
-      // quelle valgono solo quando Giacomo non ha specificato ore esatte.
+      // quelle valgono solo quando Giacomo non ha specificato ore esatte. FIX 1 (7 agosto
+      // 2026): è anche la firma di un comando emergenziale — SOLO l'ore ESPLICITO bypassa
+      // il budget, mai l'oreOverride calcolato automaticamente sotto per Cristina/Stefania
+      // (quello è il normale orario di contratto, non un'eccezione da autorizzare).
       const oreEsplicite: number | undefined = typeof input.ore === 'number' ? input.ore : undefined
+      const isEmergenza = oreEsplicite !== undefined
       // Cristina/Stefania (28h): ore giornaliere fisse e diverse per giorno (mai lo stesso
       // orario standard tutti i giorni) — sabato 6h, feriali secondo ORE_28H_FERIALI.
       let oreOverride: number | undefined = oreEsplicite
       if (oreOverride === undefined && isCristinaStefania && (input.tipo === 'mattina' || input.tipo === 'pomeriggio')) {
         oreOverride = dayOfWeek === 6 ? 6 : ORE_28H_FERIALI[dayOfWeek]
       }
-      const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, d, input.tipo, emp.ore_settimanali, emp.nome, oreOverride)
+      const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, d, input.tipo, emp.ore_settimanali, emp.nome, oreOverride, isEmergenza)
       if (erroreOre) { bloccatiPerOre++; continue }
       const { error } = await upsertShift(ctx.scheduleId, emp.id, d, input.tipo, oreOverride)
-      if (!error) modificati++
+      if (!error) {
+        modificati++
+      } else {
+        // FIX 1 STEP 3: logging esplicito — prima un fallimento qui spariva silenziosamente,
+        // il giorno veniva semplicemente saltato senza traccia né nel log né nella risposta.
+        falliti++
+        console.error(`[maia-chat] update_shift_week FALLITO — ${emp.nome} ${d} tipo=${input.tipo} ore=${oreOverride ?? 'std'}:`, error)
+      }
     }
     if (modificati === 0 && bloccatiPerOre > 0) {
       return `Errore: impossibile assegnare "${input.tipo}" a ${emp.nome} per nessuno dei giorni richiesti — supererebbe il contratto di ${emp.ore_settimanali}h in ${bloccatiPerOre} giorno/i. Proponi un'alternativa.`
+    }
+    if (falliti > 0) {
+      return `⚠️ Attenzione: ${modificati} giorni salvati correttamente, ma ${falliti} giorno/i NON sono stati salvati per un errore di database — riprova per quei giorni specifici o segnala il problema, NON dare per assegnati i giorni falliti.`
     }
     const notaOre = isTipoDomenica && modificati > 0
       ? ` IMPORTANTE: ora DEVI chiedere a Giacomo in quale/i giorno/i della settimana PRECEDENTE ${emp.nome} deve recuperare le ore domenicali lavorate — non concludere il flusso senza questa domanda.`
@@ -600,7 +660,11 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
       }
     }
 
-    return `OK: assenza "${tipoAssenza}" registrata per ${emp.nome} su ${dates.length} giorno/i (${dates.join(', ')}).${avviso}`
+    // FIX 2 (7 agosto 2026): il DB salva sempre "R" in tipo_assenza (invariato), ma la
+    // lettera mostrata a Giacomo per il Recupero è "REC" — mai "R" da sola, ambigua col
+    // Riposo normale (stessa mappa usata in manager/page.tsx, getAssenzaDisplay).
+    const tipoAssenzaDisplay = tipoAssenza === 'R' ? 'REC' : tipoAssenza
+    return `OK: assenza "${tipoAssenzaDisplay}" registrata per ${emp.nome} su ${dates.length} giorno/i (${dates.join(', ')}).${avviso}`
   }
 
   if (toolName === 'save_rule') {
@@ -772,7 +836,7 @@ FLUSSO DOMENICA OBBLIGATORIO:
 Quando Giacomo assegna un turno domenicale (domenica_lungo o domenica_corto) tramite update_shift/update_shift_week:
 1. Il tool calcola già le ore (domenica_lungo=5h, domenica_corto=3h) e ti segnala che DEVI chiedere il recupero.
 2. Rispondi SEMPRE con: "✅ Turno domenicale assegnato a [nome]. In quale giorno della settimana precedente ([date Lun-Ven] — MAI sabato) vuole che [nome] recuperi le [X] ore lavorate domenica?"
-3. Quando Giacomo indica il giorno → usa update_shift con tipo "riposo" E recupero_domenicale:true su quella data (registra automaticamente una R — Recupero, non solo lo shift a riposo).
+3. Quando Giacomo indica il giorno → usa update_shift con tipo "riposo" E recupero_domenicale:true su quella data (registra automaticamente una REC — Recupero, non solo lo shift a riposo — internamente il DB salva ancora "R" in tipo_assenza, ma qualsiasi cosa mostri/dica a Giacomo deve dire "REC", mai "R" da sola, per non confonderla col Riposo normale).
 4. Conferma: "✅ [Nome] riposa [giorno] per compensare le ore domenicali."
 NON considerare completo il flusso domenicale finché non hai gestito il riposo compensativo — se Giacomo cambia argomento senza rispondere, puoi lasciar perdere, ma la domanda va sempre fatta subito dopo l'assegnazione.
 
@@ -859,6 +923,23 @@ I tool update_shift e update_shift_week verificano automaticamente il budget ore
 settimanale e rifiutano l'operazione se la sforerebbe — se ricevi un errore di questo
 tipo, NON insistere con lo stesso turno: proponi a Giacomo un'alternativa valida
 (meno ore quel giorno, un altro giorno, o scambiare con un altro dipendente).
+ECCEZIONE (vedi EMERGENZE — ORE EXTRA sotto): questo blocco NON si applica quando Giacomo
+ha specificato un orario/ore esplicito per quel turno — in quel caso il tool salva SEMPRE,
+anche oltre il budget, e non riceverai un errore di sforamento per quel motivo.
+
+EMERGENZE — ORE EXTRA:
+Qualsiasi dipendente può eccezionalmente lavorare più ore del solito in caso di emergenza,
+su richiesta esplicita di Giacomo con orario preciso (es. "metti Damiana 8/15").
+Questi comandi vanno SEMPRE eseguiti con l'orario esatto richiesto, anche se superano
+il max_ore_giorno o il budget standard del dipendente — sono eccezioni autorizzate da Giacomo.
+Se il salvataggio fallisce per qualsiasi motivo, DEVI dirlo chiaramente, mai confermare
+un'operazione che non è realmente avvenuta.
+
+⚠️ REGOLA ASSOLUTA SULLA VERIDICITÀ DELLE CONFERME:
+Conferma un'operazione ("OK", "fatto", "✅") SOLO se il risultato del tool dice esplicitamente
+che è andata a buon fine. Se il risultato del tool inizia con "Errore" o contiene "⚠️ Attenzione"
+o descrive un fallimento in qualsiasi forma, DEVI riportare quell'errore esattamente a Giacomo,
+MAI dire che è stato fatto. Non riformulare né ammorbidire un fallimento in un successo.
 
 ⚠️ IMPORTANTE: Per assenze (Ferie/Permesso/Malattia/Recupero/Maternità) usa SEMPRE il tool
 set_assenza, MAI update_shift. Il tool update_shift è solo per turni lavorativi

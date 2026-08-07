@@ -262,3 +262,109 @@ di una settimana reale (7-12 settembre), festivi/domenica correttamente esclusi 
 giorno mostra chi si sovrappone alla fascia 12-14 (criterio identico al pannello Chiusure:
 qualunque sovrapposizione, non necessariamente copertura piena — coerente con l'esempio
 "Yuri (13/16) — solo 1 persona" fornito da Max), verde se ≥2 persone, rosso/warning se 0-1.
+
+---
+
+## 3 fix richiesti da Giacomo — emergenze ore extra, REC vs R, menu orari completo (7 agosto 2026)
+
+### FIX 1 — Maia confermava ma salvava l'orario SBAGLIATO per turni emergenziali
+
+**🐛 Root cause reale (diversa dall'ipotesi iniziale)**: il sospetto era che
+`verificaBudgetSettimanale` bloccasse silenziosamente i comandi emergenziali — risultava
+parzialmente vero (il controllo NON aveva alcun bypass per comandi espliciti, vedi fix
+sotto), ma il bug concretamente riprodotto con "metti Damiana 8/15 martedì" era un altro:
+**`oreToShiftType()`** (usata da `upsertShift` per mappare `ore` esplicite → orario reale)
+gestiva esplicitamente solo `ore === 3/4/5`, e per QUALSIASI altro valore (6, 7, 8...)
+cadeva sempre nel default fisso `08:00-14:00` (mattina) o `14:00-20:00` (pomeriggio),
+**ignorando silenziosamente il valore di "ore" richiesto**. Con 6h il default coincideva
+per puro caso col valore corretto (mascherando il bug), ma con 7h (il caso di Damiana)
+veniva troncato a 6h — Maia rispondeva "✅ Fatto, 08:00-15:00" ma il DB salvava
+`08:00-14:00`. Non un fallimento di salvataggio silenzioso, ma un **salvataggio sbagliato
+con conferma comunque positiva** — stesso sintomo riportato da Giacomo (l'orario reale non
+corrispondeva a quanto richiesto), causa diversa da quella ipotizzata.
+**Fix**: `oreToShiftType()` ora calcola dinamicamente `08:00 + ore` (mattina) o
+`20:00 - ore` (pomeriggio) per qualsiasi valore oltre 3/4/5, non solo il caso standard da
+6h. ⚠️ **Limite noto, non risolto qui** (fuori scope del bug segnalato): il parametro
+"ore" non può rappresentare un orario con un INIZIO non standard (es. "10/17" verrebbe
+letto come ore=7 e assunto 08:00-15:00, non 10:00-17:00) — servirebbe estendere lo schema
+del tool con `ora_inizio`/`ora_fine` espliciti invece di solo "ore" per coprire anche
+quel caso; il caso testato e riportato da Giacomo ("8/15") è ancorato a 08:00 quindi
+funziona correttamente col fix attuale.
+
+**Secondo problema reale, anche questo confermato**: `verificaBudgetSettimanale` non aveva
+MAI un bypass per comandi emergenziali — qualsiasi sforamento del budget settimanale
+veniva bloccato con un errore, anche con "ore" esplicito passato da Giacomo. Fix: nuovo
+parametro `isEmergenza` — in `update_shift`, la sola presenza di `input.ore` (sempre
+esplicito lì, mai calcolato automaticamente) è già la firma di un comando emergenziale; in
+`update_shift_week` va invece distinto dall'`oreOverride` finale (che può anche essere
+calcolato automaticamente per Cristina/Stefania) — solo l'`ore` ESPLICITO di Giacomo
+(`oreEsplicite`) marca `isEmergenza`, mai il valore auto-calcolato.
+
+**Terzo intervento — veridicità delle conferme**: aggiunta la sezione "EMERGENZE — ORE
+EXTRA" al system prompt (testo fornito da Giacomo) più una nuova regola esplicita
+"REGOLA ASSOLUTA SULLA VERIDICITÀ DELLE CONFERME" — Maia non deve mai dire "fatto" se il
+risultato del tool inizia con "Errore" o segnala un fallimento in qualsiasi forma.
+
+**Quarto intervento — logging (STEP 3)**: `console.error` esplicito su ogni fallimento
+reale di `upsertShift` in `update_shift`/`update_shift_week` (prima passava inosservato,
+il giorno veniva semplicemente saltato senza traccia); `update_shift_week` ora conta
+anche i fallimenti di salvataggio separatamente dai giorni bloccati per budget e lo
+segnala esplicitamente nella risposta invece di ometterlo. Aggiunto anche un log
+diagnostico temporaneo (`[maia-chat] update_shift(_week) input: ...`) che stampa i
+parametri esatti ricevuti dal tool — è stato proprio questo log a rivelare la root cause
+reale (ore=7 richiesto, ma orario salvato 08:00-14:00/6h) durante il test.
+
+**✅ Testato in produzione con dati reali** (non solo teoria): comando reale a Maia
+("metti Damiana 8/15 martedì 11 agosto") sulla settimana 10-15 agosto — **primo test
+fallito** (turno salvato 08:00-14:00 invece di 08:00-15:00, root cause trovata via log
+diagnostico), **secondo test dopo il fix di `oreToShiftType` riuscito**: turno
+effettivamente salvato in tabella `08:00:00 → 15:00:00` (7h), verificato leggendo
+direttamente il DB con un client no-store (vedi nota sotto), non solo la risposta di
+Maia. Testato anche uno scenario di sforamento del budget SETTIMANALE (12h in un giorno,
+totale settimana 24h > 22h contratto) → confermato e salvato correttamente, bypass
+funzionante. Dati di test ripristinati allo stato originale dopo la verifica.
+
+**⚠️ Nota tecnica riscontrata durante il test**: stesso bug di caching Next.js già
+documentato in mangia-pwa2/CLAUDE.md (Flow 12/notification_retry_queue) — una route di
+debug con client Supabase condiviso (senza `cache: "no-store"` esplicito) restituiva dati
+stale anche dopo un salvataggio reale avvenuto poco prima. Il client `supabaseAdmin`
+condiviso di questo repo (`src/lib/supabase.ts`) NON ha il fix no-store — se in futuro si
+scrive un endpoint che deve leggere dati appena scritti (anche in una request separata),
+usare un client dedicato con `fetch: (url, opts) => fetch(url, {...opts, cache: "no-store"})`
+invece del client condiviso, come già fatto in più punti di mangia-pwa2.
+
+### FIX 2 — Differenziare Riposo da Recupero (REC vs R)
+
+Il DB continua a salvare `"R"` in `tipo_assenza` (nessuna migrazione dati, compatibilità
+piena con dati storici) — cambia SOLO la lettera mostrata: nuova funzione
+`getAssenzaDisplay(code)` (`manager/page.tsx`) mappa `"R"` → `"REC"` (identità per tutti
+gli altri codici), usata sia nella cella tabella sia nella riga esportata nel PDF
+(jsPDF/autoTable, `row.push(getAssenzaDisplay(getAssenzaCode(...)))`). Legenda sotto la
+tabella aggiornata: `REC = Recupero` invece di `R = Recupero`. Stessa disambiguazione
+applicata a: risposte testuali di Maia (`maia-chat/route.ts`, sia il messaggio di
+conferma `update_shift` col recupero domenicale sia quello di `set_assenza`), tool
+description del parametro `tipo_assenza` (istruzione esplicita a Claude di dire sempre
+"REC" e mai "R" da sola parlando con Giacomo), `bridge/route.ts` (usato da
+`maia-turni.ts` in mangia-pwa2), e il dropdown "Tipo assenza" della pagina self-service
+dipendente (`dipendente/[token]/page.tsx`) — in tutti i casi il `value`/codice DB resta
+`"R"`, cambia solo l'etichetta visibile.
+Il Riposo normale non ha mai avuto una lettera propria (cella vuota o turno normale, non
+un'assenza) — non richiedeva alcuna modifica.
+
+### FIX 3 — Menu a cascata: stessi orari per tutti, completo e ordinato
+
+`getOrariValidi()` non filtra più per `oreSettimanali` — ritorna sempre la stessa lista
+`TUTTI_GLI_ORARI` (29 orari + `'—'` per riposo) per qualsiasi dipendente MD, ordinata
+cronologicamente per inizio poi fine, con i 4 nuovi orari richiesti (`8/15`, `10/16`,
+`11/17`, `12/16`) inclusi. Il parametro `oreSettimanali` resta nella firma della funzione
+(non più usato) per non toccare il call site esistente. `parseOrarioSelezionato()` (invariata)
+già gestiva qualsiasi stringa "HH/HH" in modo generico — nessuna modifica necessaria lì,
+funziona automaticamente con la lista estesa. Il vincolo di contratto resta attivo SOLO
+per la generazione automatica (`generator.ts`, non toccato da questo fix), mai per la
+selezione manuale dal popup.
+
+**⚠️ Non verificato via click nel browser** — la pagina manager richiede login
+email/password reale, nessuna credenziale disponibile (stesso limite già documentato più
+sopra in questo file per un fix precedente). Verificato via revisione di codice: modifica
+a basso rischio (array letterale + funzione a un'unica riga), typecheck pulito, logica di
+parsing dell'orario (`parseOrarioSelezionato`) già generica e non toccata.
