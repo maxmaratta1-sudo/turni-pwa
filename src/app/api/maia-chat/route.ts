@@ -422,6 +422,15 @@ async function upsertShift(scheduleId: string, employeeId: string, data: string,
     orario = { inizio: mapped.ora_inizio, fine: mapped.ora_fine }
   }
 
+  // Turno spezzato manuale (8 agosto 2026, solo manager/page.tsx — MAI scritto da Maia,
+  // vedi CLAUDE.md): il constraint UNIQUE ora include "sequenza", quindi l'upsert deve
+  // sempre indicarla esplicitamente (sequenza:1 — Maia scrive sempre un turno singolo).
+  // Se quel giorno era stato spezzato manualmente (2 righe, sequenza 1+2), ripulisce
+  // anche il blocco pomeriggio (sequenza 2) prima di scrivere il nuovo turno singolo,
+  // altrimenti resterebbe una riga orfana incoerente col turno appena assegnato.
+  await supabaseAdmin.from('shifts').delete()
+    .eq('schedule_id', scheduleId).eq('employee_id', employeeId).eq('data', data).gt('sequenza', 1)
+
   return supabaseAdmin.from('shifts').upsert(
     {
       schedule_id: scheduleId,
@@ -430,8 +439,9 @@ async function upsertShift(scheduleId: string, employeeId: string, data: string,
       tipo: tipoFinale,
       ora_inizio: orario?.inizio ?? null,
       ora_fine: orario?.fine ?? null,
+      sequenza: 1,
     },
-    { onConflict: 'schedule_id,employee_id,data' }
+    { onConflict: 'schedule_id,employee_id,data,sequenza' }
   )
 }
 
@@ -623,6 +633,14 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
         ore_parziali: oreParziali,
       })
 
+      // Turno spezzato manuale (8 agosto 2026, solo manager/page.tsx — MAI scritto da
+      // Maia): se quel giorno era stato spezzato manualmente (2 righe, sequenza 1+2),
+      // un'assenza lo riporta a un turno singolo — ripulisce il blocco pomeriggio
+      // (sequenza 2) prima di applicare l'assenza, altrimenti resterebbe una riga
+      // orfana incoerente.
+      await supabaseAdmin.from('shifts').delete()
+        .eq('schedule_id', ctx.scheduleId).eq('employee_id', emp.id).eq('data', d).gt('sequenza', 1)
+
       if (turnoRidotto) {
         // Permesso a ore valido su un turno esistente: accorcia invece di azzerare.
         // UPDATE (non upsert) — turnoRidotto è già garantito null se non esiste un turno
@@ -633,8 +651,8 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
           .eq('schedule_id', ctx.scheduleId).eq('employee_id', emp.id).eq('data', d)
       } else {
         await supabaseAdmin.from('shifts').upsert(
-          { schedule_id: ctx.scheduleId, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null },
-          { onConflict: 'schedule_id,employee_id,data' }
+          { schedule_id: ctx.scheduleId, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null, sequenza: 1 },
+          { onConflict: 'schedule_id,employee_id,data,sequenza' }
         )
       }
     }

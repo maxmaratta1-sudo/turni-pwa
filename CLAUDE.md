@@ -368,3 +368,79 @@ email/password reale, nessuna credenziale disponibile (stesso limite già docume
 sopra in questo file per un fix precedente). Verificato via revisione di codice: modifica
 a basso rischio (array letterale + funzione a un'unica riga), typecheck pulito, logica di
 parsing dell'orario (`parseOrarioSelezionato`) già generica e non toccata.
+
+---
+
+## Turno spezzato manuale — mattina + pomeriggio nello stesso giorno (8 agosto 2026)
+
+Caso raro/eccezionale confermato da Giacomo: un dipendente lavora due blocchi separati
+nello stesso giorno (mattina + pomeriggio, con buco in mezzo). **Esclusivamente manuale**
+via click cella in `manager/page.tsx` — **nessuna modifica al generatore automatico**
+(`generateShiftsMDWeek`) né a Maia, come esplicitamente richiesto. Blocco mattina sempre
+`08:00` → fine variabile (09:00-13:00); blocco pomeriggio sempre → `20:00`, inizio
+variabile (15:00-19:00).
+
+**Schema DB**: tabella `shifts`, nuova colonna `sequenza INT DEFAULT 1` (1 = blocco
+mattina/turno normale, 2 = blocco pomeriggio). Vecchio constraint UNIQUE
+`(schedule_id, employee_id, data)` sostituito da `(schedule_id, employee_id, data,
+sequenza)` — permette 2 righe per lo stesso dipendente/giorno. Nuovi valori `tipo`:
+`spezzato_mattina`, `spezzato_pomeriggio` (aggiunti a `TurnoTipo` in `types/index.ts` e a
+tutti e 4 i Record esaustivi `ORE_TURNO`/`ORARI_TURNO`/`ORE_TURNO_MD`/`ORARI_TURNO_MD`,
+con valori placeholder mai realmente letti perché il calcolo usa sempre `ora_inizio`/
+`ora_fine` reali della riga).
+
+**🐛 Bug trovati durante la migrazione SQL (non nello script originale fornito)**:
+1. Cast type mismatch (`operator does not exist: name[] = text[]`) nello script di
+   discovery dinamica del vecchio constraint UNIQUE — `pg_attribute.attname` è di tipo
+   `name`, non `text`; serve `array_agg(attname::text ORDER BY attname)` per confrontarlo
+   con un `text[]` letterale.
+2. **Check constraint `shifts_tipo_check`** sul campo `tipo` — non anticipato nello script
+   originale (che copriva solo il constraint UNIQUE), scoperto SOLO durante il test live
+   (`new row for relation "shifts" violates check constraint "shifts_tipo_check"`).
+   Risolto con un secondo script (`_SQL_turno_spezzato_2_tipo_check.sql`) che ricrea il
+   CHECK includendo `spezzato_mattina`/`spezzato_pomeriggio` nella lista dei valori
+   ammessi.
+3. **4 upsert esistenti rotti dal cambio di constraint** — `onConflict:
+   'schedule_id,employee_id,data'` in `maia-chat/route.ts` (×2) e `bridge/route.ts` (×2)
+   avrebbe fallito a runtime dopo il cambio (il constraint referenziato da `onConflict`
+   deve corrispondere esattamente). Corretti tutti e 4: payload ora include `sequenza: 1`,
+   `onConflict: 'schedule_id,employee_id,data,sequenza'`. Aggiunta anche una pulizia
+   difensiva (`DELETE ... WHERE sequenza > 1`) prima di ogni upsert normale di Maia/bridge,
+   per rimuovere l'eventuale blocco pomeriggio orfano se quel giorno era stato spezzato
+   manualmente in precedenza e viene poi toccato da un comando normale.
+
+**UI (`manager/page.tsx`)**: bottone "✂️ Dividi turno (mattina + pomeriggio)" in fondo al
+popup click-cella (solo MD Lanciano), apre un mini-modal con due `<select>` (fine
+mattina 09:00-13:00, inizio pomeriggio 15:00-19:00) e ore totali calcolate live. Salvataggio
+(`salvaTurnoSpezzato`) cancella le righe esistenti per quel giorno e inserisce 2 righe
+nuove (`sequenza: 1`/`2`). Cella tabella: quando esistono 2 righe per lo stesso
+dipendente/giorno, rendering impilato con divisore e colore distintivo
+`bg-fuchsia-100 text-fuchsia-800` (`Sp-M`/`Sp-P` in legenda). `getShift()` (usata da tutto
+il resto del codice per compatibilità) ordina per `sequenza` e ritorna sempre il blocco
+mattina come "primario"; nuovo helper `getShiftsForDay()` ritorna entrambe le righe
+ordinate quando serve iterare su tutte.
+
+**STEP 5 — TOT settimanale, l'assunzione iniziale ("dovrebbe funzionare già da solo,
+iterando su tutti i turni") era sbagliata**: `oreLavorateGiorno` usava `getShift()`
+(singola riga) e sommava solo il blocco mattina, ignorando il pomeriggio. Corretto per
+usare `getShiftsForDay()` e sommare le ore di tutte le righe del giorno.
+
+**PDF (Mese e Settimana, `exportPDF` — `exportPDFSettimana` lo chiama internamente quindi
+un solo fix copre entrambi)**: quando un giorno ha 2 righe, la cella mostra le due righe
+impilate (stringa multi-linea `\n`-joined) invece del turno singolo; colorazione fuchsia
+dedicata nel PDF (`didParseCell`, check su `val.includes('\n')`).
+
+**✅ Testato in produzione (solo a livello DB, via route di debug temporanea)**:
+1. Inserimento split (2 righe, sequenza 1/2, tipo/orari corretti) — verificato.
+2. Il nuovo UNIQUE `(schedule_id, employee_id, data, sequenza)` rifiuta correttamente un
+   duplicato — verificato (`duplicate key value violates unique constraint`).
+3. Maia (`update_shift` reale via `/api/maia-chat`) continua a funzionare normalmente
+   dopo il cambio di schema.
+4. **Edge case critico verificato**: split manuale di un giorno (2 righe), poi Maia
+   modifica lo stesso giorno con un comando normale → la riga orfana `sequenza=2` viene
+   correttamente cancellata e il giorno torna a un turno singolo normale (comportamento
+   difensivo voluto, non un bug).
+**⚠️ Non verificato via click nel browser** (stesso limite login email/password di tutti
+i fix precedenti in questo file) — bottone "Dividi turno", modal, cella impilata e PDF
+non sono stati click-testati nella UI reale, solo a livello DB tramite route di debug
+(creata, testata, poi rimossa — confermato 404 dopo la rimozione).

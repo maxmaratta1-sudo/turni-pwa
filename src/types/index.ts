@@ -2,6 +2,13 @@ export type TurnoTipo =
   | 'mattina' | 'pomeriggio' | 'full' | 'riposo' | 'domenica_lungo' | 'domenica_corto'
   | 'yuri_full' | 'yuri_pomeriggio' | 'mattina_corta' | 'pomeriggio_corto'
   | 'turno_breve_11_14' | 'turno_breve_12_15' | 'turno_breve_13_16' | 'turno_breve_17_20'
+  // Turno spezzato manuale (8 agosto 2026) — SOLO manager/page.tsx, mai generator.ts né
+  // Maia (vedi CLAUDE.md). Mattina sempre 08:00-fine variabile, pomeriggio sempre
+  // inizio variabile-20:00 — due righe `shifts` distinte (sequenza 1/2) per lo stesso
+  // dipendente/giorno, orario sempre letto dai campi reali ora_inizio/ora_fine mai da un
+  // lookup fisso (vedi ORE_TURNO_MD/ORARI_TURNO_MD sotto, valori placeholder mai usati
+  // realmente in pratica).
+  | 'spezzato_mattina' | 'spezzato_pomeriggio'
 
 export const MD_LANCIANO_STORE_NOME = 'MD Lanciano'
 
@@ -67,6 +74,9 @@ export interface Shift {
   tipo: TurnoTipo
   ora_inizio?: string
   ora_fine?: string
+  // Turno spezzato manuale (8 agosto 2026): 1 = blocco mattina, 2 = blocco pomeriggio.
+  // Default 1 per tutte le righe normali (turno singolo) — vedi _SQL_turno_spezzato.sql.
+  sequenza?: number
 }
 
 // Ore per tipo turno — Stroili Oasi Lanciano (store di default)
@@ -79,6 +89,7 @@ export const ORE_TURNO: Record<TurnoTipo, number> = {
   domenica_corto: 0, // non usato da Stroili
   yuri_full: 0, yuri_pomeriggio: 0, mattina_corta: 0, pomeriggio_corto: 0, // non usati da Stroili
   turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
+  spezzato_mattina: 0, spezzato_pomeriggio: 0, // non usati da Stroili — turno spezzato è solo MD
 }
 
 export const ORARI_TURNO: Record<TurnoTipo, { inizio: string; fine: string } | null> = {
@@ -93,6 +104,7 @@ export const ORARI_TURNO: Record<TurnoTipo, { inizio: string; fine: string } | n
   turno_breve_12_15: { inizio: '12:00', fine: '15:00' },
   turno_breve_13_16: { inizio: '13:00', fine: '16:00' },
   turno_breve_17_20: { inizio: '17:00', fine: '20:00' },
+  spezzato_mattina: null, spezzato_pomeriggio: null, // non usati da Stroili
 }
 
 // ── MD Lanciano — orari e ore propri (store-specific, non toccano Stroili) ──
@@ -108,6 +120,10 @@ export const ORE_TURNO_MD: Record<TurnoTipo, number> = {
   mattina_corta: 5,    // 08:00-13:00 (Max)
   pomeriggio_corto: 5, // 14:00-19:00 (Max)
   turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
+  // Turno spezzato — ore sempre calcolate dai campi reali ora_inizio/ora_fine (mai fissi,
+  // variano per definizione), questi valori sono solo placeholder di fallback mai usati
+  // in pratica (vedi getOreDisplay in manager/page.tsx, priorità sempre a ora_inizio/fine).
+  spezzato_mattina: 0, spezzato_pomeriggio: 0,
 }
 
 export const ORARI_TURNO_MD: Record<TurnoTipo, { inizio: string; fine: string } | null> = {
@@ -125,6 +141,9 @@ export const ORARI_TURNO_MD: Record<TurnoTipo, { inizio: string; fine: string } 
   turno_breve_12_15: { inizio: '12:00', fine: '15:00' },
   turno_breve_13_16: { inizio: '13:00', fine: '16:00' },
   turno_breve_17_20: { inizio: '17:00', fine: '20:00' },
+  // Placeholder mai usato realmente — vedi nota su ORE_TURNO_MD sopra.
+  spezzato_mattina: { inizio: '08:00', fine: '11:00' },
+  spezzato_pomeriggio: { inizio: '17:00', fine: '20:00' },
 }
 
 // Ore mensili target per contratto MD Lanciano (R6)

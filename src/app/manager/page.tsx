@@ -35,11 +35,14 @@ const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
   // Turni brevi — casi eccezionali, non fanno parte del ciclo standard (si assegnano solo dal popup/Maia).
   turno_breve_11_14: 'turno_breve_11_14', turno_breve_12_15: 'turno_breve_12_15',
   turno_breve_13_16: 'turno_breve_13_16', turno_breve_17_20: 'turno_breve_17_20',
+  // Turno spezzato — mai nel ciclo standard, solo dal modal "Dividi turno" (8 agosto 2026).
+  spezzato_mattina: 'spezzato_mattina', spezzato_pomeriggio: 'spezzato_pomeriggio',
 }
 const TURNO_LABEL: Record<string, string> = {
   mattina: 'M', pomeriggio: 'Pm', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC',
   yuri_full: 'YF', yuri_pomeriggio: 'Y', mattina_corta: 'M5', pomeriggio_corto: 'P5',
   turno_breve_11_14: '11/14', turno_breve_12_15: '12/15', turno_breve_13_16: '13/16', turno_breve_17_20: '17/20',
+  spezzato_mattina: 'Sp-M', spezzato_pomeriggio: 'Sp-P',
 }
 const TURNO_COLOR: Record<string, string> = {
   mattina: 'bg-blue-100 text-blue-800',
@@ -57,6 +60,9 @@ const TURNO_COLOR: Record<string, string> = {
   turno_breve_12_15: 'bg-pink-100 text-pink-800',
   turno_breve_13_16: 'bg-pink-100 text-pink-800',
   turno_breve_17_20: 'bg-pink-100 text-pink-800',
+  // Turno spezzato — colore distintivo, riconoscibile a colpo d'occhio (8 agosto 2026).
+  spezzato_mattina: 'bg-fuchsia-100 text-fuchsia-800',
+  spezzato_pomeriggio: 'bg-fuchsia-100 text-fuchsia-800',
 }
 // Ore lavorate per tipo turno — usato per la colonna TOT settimanale (solo MD).
 const ORE_PER_TURNO: Record<string, number> = {
@@ -66,6 +72,9 @@ const ORE_PER_TURNO: Record<string, number> = {
   domenica_lungo: 5, domenica_corto: 3,
   riposo: 0,
   turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
+  // Fallback mai realmente usato — il turno spezzato ha sempre ora_inizio/ora_fine reali,
+  // getOreDisplay le usa sempre in priorità (vedi sotto).
+  spezzato_mattina: 0, spezzato_pomeriggio: 0,
 }
 
 const ASSENZA_LABEL: Record<string, string> = {
@@ -194,6 +203,11 @@ export default function ManagerPage() {
   const [loadingStorico, setLoadingStorico] = useState(false)
   const [ferieSaldi, setFerieSaldi] = useState<Record<string, FerieSaldo>>({})
   const [popupCell, setPopupCell] = useState<{ empId: string; data: string; x: number; y: number } | null>(null)
+  // Turno spezzato manuale (8 agosto 2026) — modal separato dal popup orari normale.
+  const [modalSpezzato, setModalSpezzato] = useState<{ empId: string; data: string } | null>(null)
+  const [fineMattinaSpezzato, setFineMattinaSpezzato] = useState('11:00')
+  const [inizioPomeriggioSpezzato, setInizioPomeriggioSpezzato] = useState('17:00')
+  const [savingSpezzato, setSavingSpezzato] = useState(false)
   const [showChiusure, setShowChiusure] = useState(false)
   const [settimanaChiusure, setSettimanaChiusure] = useState(0)
   const [showMezzogiorno, setShowMezzogiorno] = useState(false)
@@ -469,7 +483,21 @@ Puoi:
   }
 
   function getShift(empId: string, data: string) {
-    return shifts.find(s => s.employee_id === empId && s.data === data)
+    // Se il giorno è spezzato (2 righe), ritorna sempre il blocco mattina (sequenza 1) —
+    // tutti i chiamanti esistenti si aspettano un singolo turno, comportamento invariato
+    // per i giorni normali (sequenza sempre 1 di default). Per i giorni spezzati, la
+    // visualizzazione a due blocchi usa getShiftsForDay() sotto, non questa funzione.
+    return shifts
+      .filter(s => s.employee_id === empId && s.data === data)
+      .sort((a, b) => (a.sequenza ?? 1) - (b.sequenza ?? 1))[0]
+  }
+
+  /** Tutti gli shift di un dipendente per un giorno, ordinati per sequenza — normalmente
+   * 1 solo elemento, 2 per un giorno con turno spezzato (8 agosto 2026). */
+  function getShiftsForDay(empId: string, data: string) {
+    return shifts
+      .filter(s => s.employee_id === empId && s.data === data)
+      .sort((a, b) => (a.sequenza ?? 1) - (b.sequenza ?? 1))
   }
 
   async function cancellaEmployee(emp: Employee) {
@@ -534,8 +562,19 @@ Puoi:
         } else if (hasUnavailability(emp.id, g.data)) {
           row.push(getAssenzaDisplay(getAssenzaCode(emp.id, g.data)))
         } else {
-          const shift = getShift(emp.id, g.data)
-          row.push(getTurnoDisplay(shift?.tipo || 'riposo', isMD, shift))
+          // Turno spezzato (8 agosto 2026, STEP 6) — 2 righe nella stessa cella PDF,
+          // stesso formato a due righe della UI (\n = seconda riga in autoTable).
+          const shiftsGiorno = isMD ? getShiftsForDay(emp.id, g.data) : []
+          if (isMD && shiftsGiorno.length === 2) {
+            const [blMattina, blPomeriggio] = shiftsGiorno
+            row.push(
+              `${getOreDisplay(blMattina.tipo, blMattina)}h ${getTurnoDisplay(blMattina.tipo, isMD, blMattina)}\n` +
+              `${getOreDisplay(blPomeriggio.tipo, blPomeriggio)}h ${getTurnoDisplay(blPomeriggio.tipo, isMD, blPomeriggio)}`
+            )
+          } else {
+            const shift = getShift(emp.id, g.data)
+            row.push(getTurnoDisplay(shift?.tipo || 'riposo', isMD, shift))
+          }
         }
         if (isMD && g.domenica) {
           row.push(`${totSettimana(emp.id, g.data)}h`)
@@ -556,6 +595,9 @@ Puoi:
           const val = data.cell.raw as string
           // Festivo — priorità massima, prevale su assenze/turni (viola, come la cella in tabella).
           if (val === 'FEST') { data.cell.styles.fillColor = [237, 233, 254]; return }
+          // Turno spezzato (8 agosto 2026) — cella a due righe ("Xh oo/oo\nYh oo/oo"),
+          // stesso fucsia della UI (bg-fuchsia-100).
+          if (val.includes('\n')) { data.cell.styles.fillColor = [250, 232, 255]; return }
           // Assenze — sempre lettera, indipendentemente da MD/Stroili
           if (['P', 'F', 'R', 'MT'].includes(val)) { data.cell.styles.fillColor = [254, 243, 199]; return }
           // 'M' è ambiguo: assenza "Malattia" per MD, ma turno "Mattina" per Stroili
@@ -651,8 +693,13 @@ Puoi:
     const u = unavailabilities.find(x => x.employee_id === empId && x.data === data)
     // Permesso a ore: il turno è accorciato, non azzerato — conta le ore effettivamente lavorate.
     if (u && !u.ore_parziali) return 0 // assenza a giornata intera = 0h lavorate
-    const shift = getShift(empId, data)
-    return getOreDisplay(shift?.tipo ?? 'riposo', shift)
+    // Turno spezzato (8 agosto 2026): un giorno può avere 2 righe (mattina+pomeriggio,
+    // sequenza 1/2) — somma le ore di ENTRAMBI i blocchi, non solo il primo. Per un
+    // giorno normale getShiftsForDay ritorna sempre 1 solo elemento, comportamento
+    // identico a prima (getOreDisplay su un singolo shift).
+    const shiftsGiorno = getShiftsForDay(empId, data)
+    if (shiftsGiorno.length === 0) return getOreDisplay('riposo')
+    return shiftsGiorno.reduce((sum, s) => sum + getOreDisplay(s.tipo, s), 0)
   }
 
   /** Somma le ore lavorate nei (fino a) 7 giorni che terminano con la domenica `sundayData`. */
@@ -904,11 +951,20 @@ Puoi:
     if (!schedule) return
     const emp = employees.find(e => e.id === empId)
     const { tipo, ora_inizio, ora_fine } = parseOrarioSelezionato(orario, emp)
-    const existing = getShift(empId, data)
+    const shiftsGiorno = getShiftsForDay(empId, data)
+    const existing = shiftsGiorno[0]
+
+    // Se il giorno era spezzato (2 righe) e si seleziona un orario NORMALE dal popup,
+    // torna a un turno singolo — rimuove il secondo blocco (sequenza 2), 8 agosto 2026.
+    if (shiftsGiorno.length > 1) {
+      const extra = shiftsGiorno.slice(1)
+      setShifts(prev => prev.filter(s => !extra.some(e => e.id === s.id)))
+      await supabase.from('shifts').delete().in('id', extra.map(s => s.id))
+    }
 
     if (existing) {
-      setShifts(prev => prev.map(s => s.id === existing.id ? { ...s, tipo, ora_inizio: ora_inizio ?? undefined, ora_fine: ora_fine ?? undefined } : s))
-      await supabase.from('shifts').update({ tipo, ora_inizio, ora_fine }).eq('id', existing.id)
+      setShifts(prev => prev.map(s => s.id === existing.id ? { ...s, tipo, ora_inizio: ora_inizio ?? undefined, ora_fine: ora_fine ?? undefined, sequenza: 1 } : s))
+      await supabase.from('shifts').update({ tipo, ora_inizio, ora_fine, sequenza: 1 }).eq('id', existing.id)
     } else {
       const optimistic: Shift = {
         id: `temp-${empId}-${data}`,
@@ -918,16 +974,46 @@ Puoi:
         tipo,
         ora_inizio: ora_inizio ?? undefined,
         ora_fine: ora_fine ?? undefined,
+        sequenza: 1,
       }
       setShifts(prev => [...prev, optimistic])
       const { data: newShift } = await supabase.from('shifts')
-        .insert({ schedule_id: schedule.id, employee_id: empId, data, tipo, ora_inizio, ora_fine })
+        .insert({ schedule_id: schedule.id, employee_id: empId, data, tipo, ora_inizio, ora_fine, sequenza: 1 })
         .select().single()
       if (newShift) {
         setShifts(prev => prev.map(s => s.id === `temp-${empId}-${data}` ? newShift : s))
       }
     }
     setPopupCell(null)
+  }
+
+  /** Turno spezzato manuale (8 agosto 2026, richiesta Giacomo — caso raro/eccezionale,
+   * SOLO manuale via questo modal, MAI dal generatore automatico né da Maia).
+   * Mattina sempre 08:00-fineMattina, pomeriggio sempre inizioPomeriggio-20:00 — due
+   * righe distinte (sequenza 1/2) sostituiscono qualsiasi turno singolo esistente quel
+   * giorno. */
+  async function salvaTurnoSpezzato(empId: string, data: string, fineMattina: string, inizioPomeriggio: string) {
+    if (!schedule) return
+    setSavingSpezzato(true)
+    try {
+      const esistenti = getShiftsForDay(empId, data)
+      if (esistenti.length > 0) {
+        await supabase.from('shifts').delete().in('id', esistenti.map(s => s.id))
+      }
+      const righe = [
+        { schedule_id: schedule.id, employee_id: empId, data, tipo: 'spezzato_mattina' as TurnoTipo, ora_inizio: '08:00', ora_fine: fineMattina, sequenza: 1 },
+        { schedule_id: schedule.id, employee_id: empId, data, tipo: 'spezzato_pomeriggio' as TurnoTipo, ora_inizio: inizioPomeriggio, ora_fine: '20:00', sequenza: 2 },
+      ]
+      const { data: nuovi } = await supabase.from('shifts').insert(righe).select()
+      setShifts(prev => {
+        const senzaEsistenti = prev.filter(s => !esistenti.some(e => e.id === s.id))
+        return nuovi ? [...senzaEsistenti, ...nuovi] : senzaEsistenti
+      })
+    } finally {
+      setSavingSpezzato(false)
+      setModalSpezzato(null)
+      setPopupCell(null)
+    }
   }
 
   // Raggruppa unavailabilities per dipendente per il pannello
@@ -1262,32 +1348,61 @@ Puoi:
                             </button>
                           </td>
                         )
-                      })() : (
-                        <td className={`p-1 text-center ${cellBg} ${bordoSettimana}`}>
-                          <button
-                            onClick={(e) => {
-                              if (domenicaBloccata) return
-                              if (isMD) {
-                                const rect = e.currentTarget.getBoundingClientRect()
-                                setPopupCell({ empId: emp.id, data: g.data, x: rect.left, y: rect.bottom })
-                              } else {
-                                cycleShift(emp.id, g.data)
-                              }
-                            }}
-                            disabled={domenicaBloccata}
-                            title={isMD ? `Click per scegliere orario (attuale: ${tipo})` : `Click per cambiare (attuale: ${tipo})`}
-                            className={`inline-block px-1 py-0.5 rounded hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap ${TURNO_COLOR[tipo]}`}>
-                            {isMD && tipo !== 'riposo' ? (
-                              <div className="flex flex-col items-center leading-tight">
-                                <span className="text-xs font-bold text-gray-500">{getOreDisplay(tipo, shift)}h</span>
-                                <span className="text-xs font-medium">{getTurnoDisplay(tipo, isMD, shift)}</span>
-                              </div>
-                            ) : (
-                              <span className="text-xs font-bold">{getTurnoDisplay(tipo, isMD, shift)}</span>
-                            )}
-                          </button>
-                        </td>
-                      )
+                      })() : (() => {
+                        // Turno spezzato (8 agosto 2026) — 2 righe per lo stesso giorno
+                        // (sequenza 1=mattina, 2=pomeriggio): mostrale impilate invece del
+                        // singolo turno normale, colore distintivo fucsia per riconoscerle
+                        // a colpo d'occhio.
+                        const shiftsGiorno = isMD ? getShiftsForDay(emp.id, g.data) : []
+                        if (isMD && shiftsGiorno.length === 2) {
+                          const [blMattina, blPomeriggio] = shiftsGiorno
+                          return (
+                            <td className={`p-1 text-center ${cellBg} ${bordoSettimana}`}>
+                              <button
+                                onClick={(e) => {
+                                  if (domenicaBloccata) return
+                                  const rect = e.currentTarget.getBoundingClientRect()
+                                  setPopupCell({ empId: emp.id, data: g.data, x: rect.left, y: rect.bottom })
+                                }}
+                                disabled={domenicaBloccata}
+                                title="Turno spezzato — click per modificare"
+                                className="inline-block px-1 py-0.5 rounded hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap bg-fuchsia-100 text-fuchsia-800">
+                                <div className="flex flex-col items-center leading-tight text-xs">
+                                  <div className="font-medium">{getOreDisplay(blMattina.tipo, blMattina)}h {getTurnoDisplay(blMattina.tipo, isMD, blMattina)}</div>
+                                  <div className="border-t border-fuchsia-300 w-full my-0.5" />
+                                  <div className="font-medium">{getOreDisplay(blPomeriggio.tipo, blPomeriggio)}h {getTurnoDisplay(blPomeriggio.tipo, isMD, blPomeriggio)}</div>
+                                </div>
+                              </button>
+                            </td>
+                          )
+                        }
+                        return (
+                          <td className={`p-1 text-center ${cellBg} ${bordoSettimana}`}>
+                            <button
+                              onClick={(e) => {
+                                if (domenicaBloccata) return
+                                if (isMD) {
+                                  const rect = e.currentTarget.getBoundingClientRect()
+                                  setPopupCell({ empId: emp.id, data: g.data, x: rect.left, y: rect.bottom })
+                                } else {
+                                  cycleShift(emp.id, g.data)
+                                }
+                              }}
+                              disabled={domenicaBloccata}
+                              title={isMD ? `Click per scegliere orario (attuale: ${tipo})` : `Click per cambiare (attuale: ${tipo})`}
+                              className={`inline-block px-1 py-0.5 rounded hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap ${TURNO_COLOR[tipo]}`}>
+                              {isMD && tipo !== 'riposo' ? (
+                                <div className="flex flex-col items-center leading-tight">
+                                  <span className="text-xs font-bold text-gray-500">{getOreDisplay(tipo, shift)}h</span>
+                                  <span className="text-xs font-medium">{getTurnoDisplay(tipo, isMD, shift)}</span>
+                                </div>
+                              ) : (
+                                <span className="text-xs font-bold">{getTurnoDisplay(tipo, isMD, shift)}</span>
+                              )}
+                            </button>
+                          </td>
+                        )
+                      })()
 
                       const showTot = isMD && g.domenica
                       const tot = showTot ? totSettimana(emp.id, g.data) : 0
@@ -1321,6 +1436,7 @@ Puoi:
               {!isMD && <span><strong>—</strong> = Riposo</span>}
               {/* MD: le celle mostrano già gli orari — nessuna voce turno in legenda, solo assenze. */}
               {isMD && <span className="text-pink-700">11/14, 12/15, 13/16, 17/20 = Turno breve (3h)</span>}
+              {isMD && <span className="text-fuchsia-700">✂️ = Turno spezzato (mattina 08:00-x + pomeriggio x-20:00)</span>}
               <span><strong className="text-yellow-700">F</strong><span className="text-yellow-700"> = Ferie</span></span>
               <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
               <span><strong className="text-yellow-700">REC</strong><span className="text-yellow-700"> = Recupero</span></span>
@@ -1346,6 +1462,63 @@ Puoi:
                     {orario}
                   </button>
                 ))}
+                {isMD && (
+                  <button onClick={() => { setModalSpezzato({ empId: popupCell.empId, data: popupCell.data }); setPopupCell(null) }}
+                    className="block w-full text-left px-3 py-1 hover:bg-fuchsia-50 text-sm rounded border-t mt-1 pt-2 text-fuchsia-700 whitespace-nowrap">
+                    ✂️ Dividi turno (mattina + pomeriggio)
+                  </button>
+                )}
+              </div>
+            </>
+          )
+        })()}
+
+        {/* Modal "Dividi turno" — turno spezzato manuale, caso raro/eccezionale, SOLO
+            manuale (mai generatore automatico né Maia), 8 agosto 2026. */}
+        {modalSpezzato && (() => {
+          const emp = employees.find(e => e.id === modalSpezzato.empId)
+          if (!emp) return null
+          const oreMattina = parseInt(fineMattinaSpezzato.split(':')[0], 10) - 8
+          const orePomeriggio = 20 - parseInt(inizioPomeriggioSpezzato.split(':')[0], 10)
+          const oreTotali = oreMattina + orePomeriggio
+          return (
+            <>
+              <div className="fixed inset-0 bg-black/30 z-[999]" onClick={() => setModalSpezzato(null)} />
+              <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-lg shadow-xl p-5 z-[1000] w-80">
+                <h3 className="font-semibold text-sm mb-1">✂️ Dividi turno — {emp.nome}</h3>
+                <p className="text-xs text-gray-500 mb-3">{modalSpezzato.data}</p>
+
+                <label className="block text-xs font-medium text-gray-700 mb-1">Blocco mattina (inizia sempre alle 08:00)</label>
+                <select value={fineMattinaSpezzato} onChange={e => setFineMattinaSpezzato(e.target.value)}
+                  className="w-full border rounded px-2 py-1 text-sm mb-3">
+                  <option value="09:00">08/09 (1h)</option>
+                  <option value="10:00">08/10 (2h)</option>
+                  <option value="11:00">08/11 (3h)</option>
+                  <option value="12:00">08/12 (4h)</option>
+                  <option value="13:00">08/13 (5h)</option>
+                </select>
+
+                <label className="block text-xs font-medium text-gray-700 mb-1">Blocco pomeriggio (finisce sempre alle 20:00)</label>
+                <select value={inizioPomeriggioSpezzato} onChange={e => setInizioPomeriggioSpezzato(e.target.value)}
+                  className="w-full border rounded px-2 py-1 text-sm mb-3">
+                  <option value="15:00">15/20 (5h)</option>
+                  <option value="16:00">16/20 (4h)</option>
+                  <option value="17:00">17/20 (3h)</option>
+                  <option value="18:00">18/20 (2h)</option>
+                  <option value="19:00">19/20 (1h)</option>
+                </select>
+
+                <div className="text-sm font-medium text-fuchsia-700 mb-3">Totale: {oreTotali}h</div>
+
+                <div className="flex gap-2">
+                  <button onClick={() => setModalSpezzato(null)}
+                    className="flex-1 border rounded px-3 py-1.5 text-sm hover:bg-gray-50">Annulla</button>
+                  <button disabled={savingSpezzato}
+                    onClick={() => salvaTurnoSpezzato(modalSpezzato.empId, modalSpezzato.data, fineMattinaSpezzato, inizioPomeriggioSpezzato)}
+                    className="flex-1 bg-fuchsia-600 text-white rounded px-3 py-1.5 text-sm hover:bg-fuchsia-700 disabled:opacity-50">
+                    {savingSpezzato ? 'Salvo...' : 'Salva'}
+                  </button>
+                </div>
               </div>
             </>
           )

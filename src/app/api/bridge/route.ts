@@ -177,9 +177,15 @@ export async function POST(req: NextRequest) {
     const schedule_id = await getScheduleId(store_id, new Date(data + 'T00:00:00'))
     if (!schedule_id) return NextResponse.json({ error: 'Nessun piano turni per questa data' }, { status: 404 })
 
+    // Turno spezzato manuale (8 agosto 2026, solo manager/page.tsx): il constraint UNIQUE
+    // ora include "sequenza" — questo bridge scrive sempre un turno singolo (sequenza:1) e
+    // ripulisce l'eventuale blocco pomeriggio (sequenza 2) se quel giorno era spezzato.
+    await supabaseAdmin.from('shifts').delete()
+      .eq('schedule_id', schedule_id).eq('employee_id', emp.id).eq('data', data).gt('sequenza', 1)
+
     const { error } = await supabaseAdmin.from('shifts').upsert(
-      { schedule_id, employee_id: emp.id, data, tipo, ora_inizio: ora_inizio ?? null, ora_fine: ora_fine ?? null },
-      { onConflict: 'schedule_id,employee_id,data' }
+      { schedule_id, employee_id: emp.id, data, tipo, ora_inizio: ora_inizio ?? null, ora_fine: ora_fine ?? null, sequenza: 1 },
+      { onConflict: 'schedule_id,employee_id,data,sequenza' }
     )
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
@@ -205,9 +211,13 @@ export async function POST(req: NextRequest) {
         tipo_assenza, motivo: motivo || null, inserito_da: 'maia_whatsapp',
       })
 
+      // Stessa pulizia del blocco pomeriggio spezzato (vedi nota sopra in update_shift).
+      await supabaseAdmin.from('shifts').delete()
+        .eq('schedule_id', schedule_id).eq('employee_id', emp.id).eq('data', d).gt('sequenza', 1)
+
       await supabaseAdmin.from('shifts').upsert(
-        { schedule_id, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null },
-        { onConflict: 'schedule_id,employee_id,data' }
+        { schedule_id, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null, sequenza: 1 },
+        { onConflict: 'schedule_id,employee_id,data,sequenza' }
       )
     }
 
