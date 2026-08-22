@@ -5,7 +5,6 @@ import { Employee, Shift } from '@/types'
 interface Msg { role: 'user' | 'assistant'; content: string }
 
 interface Props {
-  isMD: boolean
   storeNome: string
   storeId: string | null
   scheduleId: string | null
@@ -43,11 +42,10 @@ function buildContext(employees: Employee[], shifts: Shift[], giorni: { data: st
 }
 
 /**
- * Chat bubble "Maia — Turni Manager". Visibile SOLO per MD Lanciano — il system
- * prompt è specifico per quel negozio, non ha senso mostrarla ad altri store (Stroili).
- * La chiamata ad Anthropic passa sempre da /api/maia-chat: la chiave resta server-side.
+ * Chat bubble "Maia — Turni Manager". La chiamata ad Anthropic passa sempre da
+ * /api/maia-chat: la chiave resta server-side.
  */
-export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, employees, shifts, giorni, mese, anno, settimanaInizio, settimanaFine }: Props) {
+export default function MaiaChatBubble({ storeNome, storeId, scheduleId, employees, shifts, giorni, mese, anno, settimanaInizio, settimanaFine }: Props) {
   const [open, setOpen] = useState(false)
   const [messages, setMessages] = useState<Msg[]>([])
   const [input, setInput] = useState('')
@@ -97,7 +95,6 @@ export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, e
 
   // Messaggi automatici inviati dall'esterno (es. bottone "Controlla turni" nel manager)
   useEffect(() => {
-    if (!isMD) return
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ message: string }>).detail
       if (!detail?.message) return
@@ -106,9 +103,7 @@ export default function MaiaChatBubble({ isMD, storeNome, storeId, scheduleId, e
     }
     window.addEventListener('maiaAutoMessage', handler as EventListener)
     return () => window.removeEventListener('maiaAutoMessage', handler as EventListener)
-  }, [isMD, messages, loading, employees, shifts, giorni, mese, anno, storeId, scheduleId, settimanaInizio, settimanaFine])
-
-  if (!isMD) return null
+  }, [messages, loading, employees, shifts, giorni, mese, anno, storeId, scheduleId, settimanaInizio, settimanaFine])
 
   return (
     <>

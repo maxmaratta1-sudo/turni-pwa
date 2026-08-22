@@ -3,7 +3,6 @@ import { supabaseAdmin } from '@/lib/supabase'
 import { generateShiftsMDWeek } from '@/lib/generator'
 import { generateWeekWithOpus, resolveOpusShifts } from '@/lib/generateWithOpus'
 import { validateWeekShifts } from '@/lib/validateShifts'
-import { MD_LANCIANO_STORE_NOME } from '@/types'
 
 export async function POST(req: NextRequest) {
   try {
@@ -65,10 +64,6 @@ export async function POST(req: NextRequest) {
     // JS deterministico, per non cambiare il comportamento del bottone esistente in
     // manager/page.tsx senza una decisione esplicita di attivarlo lì.
     if (use_opus && schedule.store_id) {
-      const { data: storeRow } = await supabaseAdmin.from('stores').select('nome').eq('id', schedule.store_id).single()
-      if (storeRow?.nome !== MD_LANCIANO_STORE_NOME) {
-        return NextResponse.json({ error: 'use_opus è supportato solo per MD Lanciano' }, { status: 400 })
-      }
       const { data: configRow, error: configErr } = await supabaseAdmin
         .from('turni_config').select('config').eq('store_id', schedule.store_id).maybeSingle()
       if (configErr || !configRow?.config) {

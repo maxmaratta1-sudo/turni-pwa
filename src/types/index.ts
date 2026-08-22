@@ -10,8 +10,6 @@ export type TurnoTipo =
   // realmente in pratica).
   | 'spezzato_mattina' | 'spezzato_pomeriggio'
 
-export const MD_LANCIANO_STORE_NOME = 'MD Lanciano'
-
 export interface Store {
   id: string
   nome: string
@@ -28,7 +26,6 @@ export interface Employee {
   ore_settimanali: 20 | 22 | 28 | 30 | 35 | 36 | 40 | 46
   token: string
   attivo: boolean
-  // ── Campi MD Lanciano (opzionali — undefined per Stroili) ──
   ruolo?: Ruolo
   priorita_cassa?: number
   turno_fisso?: TurnoFisso
@@ -79,35 +76,6 @@ export interface Shift {
   sequenza?: number
 }
 
-// Ore per tipo turno — Stroili Oasi Lanciano (store di default)
-export const ORE_TURNO: Record<TurnoTipo, number> = {
-  mattina: 5,    // 09:00-14:00
-  pomeriggio: 6, // 14:00-20:00
-  full: 9,       // 09:00-20:00
-  riposo: 0,
-  domenica_lungo: 0, // non usato da Stroili
-  domenica_corto: 0, // non usato da Stroili
-  yuri_full: 0, yuri_pomeriggio: 0, mattina_corta: 0, pomeriggio_corto: 0, // non usati da Stroili
-  turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
-  spezzato_mattina: 0, spezzato_pomeriggio: 0, // non usati da Stroili — turno spezzato è solo MD
-}
-
-export const ORARI_TURNO: Record<TurnoTipo, { inizio: string; fine: string } | null> = {
-  mattina:    { inizio: '09:00', fine: '14:00' },
-  pomeriggio: { inizio: '14:00', fine: '20:00' },
-  full:       { inizio: '09:00', fine: '20:00' },
-  riposo: null,
-  domenica_lungo: null,
-  domenica_corto: null,
-  yuri_full: null, yuri_pomeriggio: null, mattina_corta: null, pomeriggio_corto: null,
-  turno_breve_11_14: { inizio: '11:00', fine: '14:00' },
-  turno_breve_12_15: { inizio: '12:00', fine: '15:00' },
-  turno_breve_13_16: { inizio: '13:00', fine: '16:00' },
-  turno_breve_17_20: { inizio: '17:00', fine: '20:00' },
-  spezzato_mattina: null, spezzato_pomeriggio: null, // non usati da Stroili
-}
-
-// ── MD Lanciano — orari e ore propri (store-specific, non toccano Stroili) ──
 export const ORE_TURNO_MD: Record<TurnoTipo, number> = {
   mattina: 6,          // 08:00-14:00
   pomeriggio: 6,       // 14:00-20:00

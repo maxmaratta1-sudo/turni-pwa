@@ -2,22 +2,21 @@
 import { useState, useEffect, useRef, Fragment } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { Employee, Schedule, Shift, TurnoTipo, MD_LANCIANO_STORE_NOME, ORARI_TURNO, ORARI_TURNO_MD, FerieSaldo } from '@/types'
+import { Employee, Schedule, Shift, TurnoTipo, ORARI_TURNO_MD, FerieSaldo } from '@/types'
 import MaiaChatBubble from '@/components/MaiaChatBubble'
 import { oreFromOrario } from '@/lib/generator'
 
 const MESI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
                'Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre']
 
-// Ordine fisso dipendenti per MD Lanciano (non alfabetico) — Stroili resta alfabetico.
+// Ordine fisso dipendenti MD Lanciano (non alfabetico).
 const ORDINE_MD = [
   'Angelica', 'Damiana', 'Elisa', 'Marilena',
   'Max', 'Romeo', 'Stefania', 'Cristina',
   'Yuri', 'Tony', 'Gilda',
 ]
 
-function sortEmployees(emps: Employee[], isMD: boolean): Employee[] {
-  if (!isMD) return [...emps].sort((a, b) => a.nome.localeCompare(b.nome))
+function sortEmployees(emps: Employee[]): Employee[] {
   return [...emps].sort((a, b) => {
     const ia = ORDINE_MD.indexOf(a.nome)
     const ib = ORDINE_MD.indexOf(b.nome)
@@ -26,17 +25,6 @@ function sortEmployees(emps: Employee[], isMD: boolean): Employee[] {
     if (ib === -1) return -1
     return ia - ib
   })
-}
-const TURNO_CYCLE: Record<TurnoTipo, TurnoTipo> = {
-  mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina',
-  domenica_lungo: 'domenica_lungo', domenica_corto: 'domenica_corto',
-  yuri_full: 'yuri_full', yuri_pomeriggio: 'yuri_pomeriggio',
-  mattina_corta: 'pomeriggio_corto', pomeriggio_corto: 'mattina_corta',
-  // Turni brevi — casi eccezionali, non fanno parte del ciclo standard (si assegnano solo dal popup/Maia).
-  turno_breve_11_14: 'turno_breve_11_14', turno_breve_12_15: 'turno_breve_12_15',
-  turno_breve_13_16: 'turno_breve_13_16', turno_breve_17_20: 'turno_breve_17_20',
-  // Turno spezzato — mai nel ciclo standard, solo dal modal "Dividi turno" (8 agosto 2026).
-  spezzato_mattina: 'spezzato_mattina', spezzato_pomeriggio: 'spezzato_pomeriggio',
 }
 const TURNO_LABEL: Record<string, string> = {
   mattina: 'M', pomeriggio: 'Pm', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC',
@@ -64,7 +52,7 @@ const TURNO_COLOR: Record<string, string> = {
   spezzato_mattina: 'bg-fuchsia-100 text-fuchsia-800',
   spezzato_pomeriggio: 'bg-fuchsia-100 text-fuchsia-800',
 }
-// Ore lavorate per tipo turno — usato per la colonna TOT settimanale (solo MD).
+// Ore lavorate per tipo turno — usato per la colonna TOT settimanale.
 const ORE_PER_TURNO: Record<string, number> = {
   mattina: 6, pomeriggio: 6, full: 9,
   mattina_corta: 5, pomeriggio_corto: 5,
@@ -98,8 +86,7 @@ const ASSENZA_COLOR: Record<string, string> = {
   MT: 'bg-pink-100 text-pink-800',
 }
 
-// Orari reali MD Lanciano — mostrati in cella invece delle lettere, SOLO per MD.
-// Stroili conserva le lettere (i suoi orari reali sono 9-14/14-20, diversi da MD).
+// Orari reali MD Lanciano — mostrati in cella invece delle lettere.
 const TURNO_ORARIO_MD: Record<string, string> = {
   mattina: '8/14', pomeriggio: '14/20', full: '8/20',
   mattina_corta: '8/13', pomeriggio_corto: '14/19',
@@ -116,14 +103,11 @@ function formatOraShort(time?: string | null): string {
 
 /** Mostra l'orario REALE del turno (da ora_inizio/ora_fine, ore intere variabili) —
  * fallback al lookup fisso solo se i tempi non sono stati salvati (righe legacy). */
-function getTurnoDisplay(tipo: string, isMD: boolean, shift?: { ora_inizio?: string | null; ora_fine?: string | null }): string {
-  if (isMD) {
-    if (tipo !== 'riposo' && shift?.ora_inizio && shift?.ora_fine) {
-      return `${formatOraShort(shift.ora_inizio)}/${formatOraShort(shift.ora_fine)}`
-    }
-    return TURNO_ORARIO_MD[tipo] ?? TURNO_LABEL[tipo] ?? tipo
+function getTurnoDisplay(tipo: string, shift?: { ora_inizio?: string | null; ora_fine?: string | null }): string {
+  if (tipo !== 'riposo' && shift?.ora_inizio && shift?.ora_fine) {
+    return `${formatOraShort(shift.ora_inizio)}/${formatOraShort(shift.ora_fine)}`
   }
-  return TURNO_LABEL[tipo] ?? tipo
+  return TURNO_ORARIO_MD[tipo] ?? TURNO_LABEL[tipo] ?? tipo
 }
 
 /** Ore effettive lavorate — calcolate dagli orari reali del turno, non da un lookup fisso,
@@ -132,33 +116,6 @@ function getOreDisplay(tipo: string, shift?: { ora_inizio?: string | null; ora_f
   if (tipo === 'riposo') return 0
   const fromTimes = oreFromOrario(shift?.ora_inizio, shift?.ora_fine)
   return fromTimes > 0 ? fromTimes : (ORE_PER_TURNO[tipo] ?? 0)
-}
-
-/** Prossimo turno nel ciclo di click — comportamento diverso per MD Lanciano (turni fissi, domenica attiva). */
-function nextTurno(current: TurnoTipo, emp: Employee, isDomenica: boolean, isMD: boolean): TurnoTipo {
-  if (!isMD) return TURNO_CYCLE[current] // Stroili — invariato
-
-  if (isDomenica) {
-    // Gilda e Tony: escluse definitivamente dai turni domenicali — click bloccato su riposo
-    if (emp.turno_fisso === 'mattina') return 'riposo'
-    const cycle: Partial<Record<TurnoTipo, TurnoTipo>> = {
-      riposo: 'domenica_lungo', domenica_lungo: 'domenica_corto', domenica_corto: 'riposo',
-    }
-    return cycle[current] ?? 'domenica_lungo'
-  }
-
-  // Gilda/Tony: turno fisso mattina, il click non li sposta mai in pomeriggio
-  if (emp.turno_fisso === 'mattina') return 'mattina'
-
-  // R9 — le regole/turni speciali (Yuri, Max) sono override automatici, ma un click
-  // manuale di Giacomo può sempre spostare la cella sul ciclo turni standard.
-  const cycle: Partial<Record<TurnoTipo, TurnoTipo>> = {
-    mattina: 'pomeriggio', pomeriggio: 'full', full: 'riposo', riposo: 'mattina',
-    domenica_lungo: 'mattina', domenica_corto: 'mattina',
-    yuri_full: 'pomeriggio', yuri_pomeriggio: 'pomeriggio',
-    mattina_corta: 'pomeriggio_corto', pomeriggio_corto: 'riposo',
-  }
-  return cycle[current] ?? 'mattina'
 }
 
 interface Unavailability {
@@ -220,7 +177,6 @@ export default function ManagerPage() {
   // ma l'ordine dei giorni non cambia mai).
   const giorniOrdinati = giorni
   const offsetLunedi = getOffsetLunedi(anno, mese)
-  const isMD = storeNome === MD_LANCIANO_STORE_NOME
   const settimaneMese = getSettimaneLunDom(giorni, mese)
   const settimanaAttiva = settimanaSelezionata !== '' ? settimaneMese[settimanaSelezionata] : null
 
@@ -278,15 +234,13 @@ export default function ManagerPage() {
       const { data: emps, error: empErr } = await supabase.from('employees')
         .select('*').eq('store_id', storeId!).eq('attivo', true).order('nome')
       if (empErr) { setError(`employees: ${empErr.message}`); setLoading(false); return }
-      setEmployees(sortEmployees(emps || [], isMD))
+      setEmployees(sortEmployees(emps || []))
 
-      if (isMD) {
-        const { data: festiviData } = await supabase.from('turni_festivi')
-          .select('data, nome').eq('store_id', storeId!)
-        setFestiviMap(Object.fromEntries((festiviData || []).map((f: any) => [f.data, f.nome])))
-      }
+      const { data: festiviData } = await supabase.from('turni_festivi')
+        .select('data, nome').eq('store_id', storeId!)
+      setFestiviMap(Object.fromEntries((festiviData || []).map((f: any) => [f.data, f.nome])))
 
-      if (isMD && emps && emps.length > 0) {
+      if (emps && emps.length > 0) {
         const { data: saldi } = await supabase.from('ferie_saldo')
           .select('*').in('employee_id', emps.map(e => e.id)).eq('anno', anno)
         const map: Record<string, FerieSaldo> = {}
@@ -421,7 +375,7 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
         .filter(({ shift }) => shift && shift.tipo !== 'riposo')
       const oreTot = giorniFeriali.reduce((sum, g) => sum + oreLavorateGiorno(emp.id, g.data), 0)
       const dettaglio = turniSett
-        .map(({ g, shift }) => `${g.giorno} ${g.num}: ${getTurnoDisplay(shift!.tipo, isMD, shift!)}`)
+        .map(({ g, shift }) => `${g.giorno} ${g.num}: ${getTurnoDisplay(shift!.tipo, shift!)}`)
         .join(', ')
       return `- ${emp.nome} (${emp.ore_settimanali}h contratto): ${oreTot}h assegnate${dettaglio ? ' — ' + dettaglio : ''}`
     }).join('\n')
@@ -430,7 +384,7 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
       const lavoranti = employees
         .map(emp => ({ emp, shift: getShift(emp.id, g.data) }))
         .filter(({ shift }) => shift && shift.tipo !== 'riposo')
-      const elenco = lavoranti.map(({ emp, shift }) => `${emp.nome} (${getTurnoDisplay(shift!.tipo, isMD, shift!)})`).join(', ')
+      const elenco = lavoranti.map(({ emp, shift }) => `${emp.nome} (${getTurnoDisplay(shift!.tipo, shift!)})`).join(', ')
       return `- ${g.num} ${MESI[mese - 1]}: ${elenco || 'nessuno assegnato'}`
     }).join('\n')
 
@@ -509,7 +463,7 @@ Puoi:
   async function ripristinaEmployee(emp: Employee) {
     await supabase.from('employees').update({ attivo: true }).eq('id', emp.id)
     setCestino(prev => prev.filter(e => e.id !== emp.id))
-    setEmployees(prev => sortEmployees([...prev, emp], isMD))
+    setEmployees(prev => sortEmployees([...prev, emp]))
   }
 
   async function svuotaCestino() {
@@ -550,33 +504,33 @@ Puoi:
     const headRow: string[] = ['Dipendente']
     giorniDaEsportare.forEach(g => {
       headRow.push(`${g.num}\n${g.giorno}`)
-      if (isMD && g.domenica) headRow.push('TOT')
+      if (g.domenica) headRow.push('TOT')
     })
     const head = [headRow]
 
     const body = employees.map(emp => {
       const row: string[] = [emp.nome]
       giorniDaEsportare.forEach(g => {
-        if (isMD && festiviMap[g.data]) {
+        if (festiviMap[g.data]) {
           row.push('FEST')
         } else if (hasUnavailability(emp.id, g.data)) {
           row.push(getAssenzaDisplay(getAssenzaCode(emp.id, g.data)))
         } else {
           // Turno spezzato (8 agosto 2026, STEP 6) — 2 righe nella stessa cella PDF,
           // stesso formato a due righe della UI (\n = seconda riga in autoTable).
-          const shiftsGiorno = isMD ? getShiftsForDay(emp.id, g.data) : []
-          if (isMD && shiftsGiorno.length === 2) {
+          const shiftsGiorno = getShiftsForDay(emp.id, g.data)
+          if (shiftsGiorno.length === 2) {
             const [blMattina, blPomeriggio] = shiftsGiorno
             row.push(
-              `${getOreDisplay(blMattina.tipo, blMattina)}h ${getTurnoDisplay(blMattina.tipo, isMD, blMattina)}\n` +
-              `${getOreDisplay(blPomeriggio.tipo, blPomeriggio)}h ${getTurnoDisplay(blPomeriggio.tipo, isMD, blPomeriggio)}`
+              `${getOreDisplay(blMattina.tipo, blMattina)}h ${getTurnoDisplay(blMattina.tipo, blMattina)}\n` +
+              `${getOreDisplay(blPomeriggio.tipo, blPomeriggio)}h ${getTurnoDisplay(blPomeriggio.tipo, blPomeriggio)}`
             )
           } else {
             const shift = getShift(emp.id, g.data)
-            row.push(getTurnoDisplay(shift?.tipo || 'riposo', isMD, shift))
+            row.push(getTurnoDisplay(shift?.tipo || 'riposo', shift))
           }
         }
-        if (isMD && g.domenica) {
+        if (g.domenica) {
           row.push(`${totSettimana(emp.id, g.data)}h`)
         }
       })
@@ -598,14 +552,13 @@ Puoi:
           // Turno spezzato (8 agosto 2026) — cella a due righe ("Xh oo/oo\nYh oo/oo"),
           // stesso fucsia della UI (bg-fuchsia-100).
           if (val.includes('\n')) { data.cell.styles.fillColor = [250, 232, 255]; return }
-          // Assenze — sempre lettera, indipendentemente da MD/Stroili
+          // Assenze — sempre lettera.
           if (['P', 'F', 'R', 'MT'].includes(val)) { data.cell.styles.fillColor = [254, 243, 199]; return }
-          // 'M' è ambiguo: assenza "Malattia" per MD, ma turno "Mattina" per Stroili
-          // (che mostra ancora lettere in cella) — per MD coloriamo come assenza (rosso).
-          if (val === 'M' && isMD) { data.cell.styles.fillColor = [254, 226, 226]; return }
+          // 'M' = assenza "Malattia" — coloriamo come assenza (rosso).
+          if (val === 'M') { data.cell.styles.fillColor = [254, 226, 226]; return }
 
           // Colonna TOT (es. "22h") — verde/rosso in base allo scarto dal contratto settimanale
-          const totMatch = isMD ? val.match(/^(\d+)h$/) : null
+          const totMatch = val.match(/^(\d+)h$/)
           if (totMatch) {
             const tot = parseInt(totMatch[1], 10)
             const emp = employees[data.row.index]
@@ -616,7 +569,7 @@ Puoi:
             return
           }
 
-          // Turni — MD mostra orari, Stroili mostra lettere: due mappe di colore separate
+          // Turni — celle mostrano orari reali (es. "8/14").
           const colorMD: Record<string, [number, number, number]> = {
             '8/14': [219, 234, 254],   // mattina
             '14/20': [254, 237, 213],  // pomeriggio
@@ -631,12 +584,7 @@ Puoi:
             '12/15': [252, 231, 243],  // turno_breve_12_15
             '17/20': [252, 231, 243],  // turno_breve_17_20
           }
-          const colorStroili: Record<string, [number, number, number]> = {
-            M: [219, 234, 254], Pm: [254, 237, 213], F: [220, 252, 231], '—': [243, 244, 246],
-            DL: [237, 233, 254], DC: [237, 233, 254], YF: [191, 219, 254], Y: [191, 219, 254],
-            M5: [207, 250, 254], P5: [254, 237, 213],
-          }
-          const color = (isMD ? colorMD : colorStroili)[val]
+          const color = colorMD[val]
           if (color) data.cell.styles.fillColor = color
         }
       }
@@ -662,10 +610,6 @@ Puoi:
   }
 
   // Tipo di assenza — colonna reale `tipo_assenza` (default 'P').
-  // NOTA IMPORTANTE: 'F' (Ferie) e 'M' (Malattia) letteralmente richiesti, ma collidono
-  // visivamente con 'F'=turno "full" e 'M'=turno "Mattina" nella legenda/tabella di
-  // Stroili (che mostra ancora lettere per i turni, non orari). Per MD non c'è ambiguità
-  // — le celle turno mostrano orari, non lettere. Segnalato, non bloccante.
   const ASSENZA_CYCLE = ['P', 'F', 'R', 'M', 'MT'] as const
 
   function getAssenzaCode(empId: string, data: string): string {
@@ -683,7 +627,7 @@ Puoi:
     setUnavailabilities(prev => prev.map(x => x.id === u.id ? { ...x, tipo_assenza: next } : x))
   }
 
-  // ── Colonna TOT settimanale (solo MD) ────────────────────────────────────
+  // ── Colonna TOT settimanale ──────────────────────────────────────────────
   // La colonna TOT va inserita dopo OGNI domenica reale (g.domenica), non dopo
   // giorni fissi 7/14/21/28 — un mese non inizia sempre di lunedì, quindi quei
   // numeri fissi disallineavano il raggruppamento rispetto alle settimane ISO
@@ -740,11 +684,10 @@ Puoi:
    * `emp` avrebbe lavorato nei festivi di questa settimana (come la domenica, non deve
    * mai abbassare artificialmente il contratto atteso). Eccezione: per Carlo, un festivo
    * Lun-Ven NON riduce il target perché il generatore ridistribuisce già le sue ore sui
-   * giorni feriali rimanenti (vedi distribuisciOreConFestivi in generator.ts) — ma un
-   * festivo di SABATO sì, perché il sabato non fa parte di quella redistribuzione
-   * dinamica (per lui come per tutti gli altri). */
+   * giorni feriali rimanenti (vedi distribuisciOre in generator.ts) — ma un festivo di
+   * SABATO sì, perché il sabato non fa parte di quella redistribuzione dinamica (per lui
+   * come per tutti gli altri). */
   function targetSettimana(emp: Employee, sundayData: string): number {
-    if (!isMD) return emp.ore_settimanali
     const sunday = new Date(sundayData + 'T00:00:00')
     const start = new Date(sunday)
     start.setDate(start.getDate() - 6)
@@ -831,7 +774,7 @@ Puoi:
       }),
     })
 
-    if (res.ok && isMD && (deltaFerieGiorni !== 0 || deltaPermessiOre !== 0)) {
+    if (res.ok && (deltaFerieGiorni !== 0 || deltaPermessiOre !== 0)) {
       await fetch('/api/ferie-saldo', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -848,51 +791,6 @@ Puoi:
     if (res.ok) {
       setModalSaved(true)
       await loadData()
-    }
-  }
-
-  async function cycleShift(empId: string, data: string) {
-    if (!schedule) return
-    const emp = employees.find(e => e.id === empId)
-    if (!emp) return
-    const isDomenica = giorni.find(g => g.data === data)?.domenica ?? false
-    const existing = getShift(empId, data)
-    const currentTipo: TurnoTipo = (existing?.tipo as TurnoTipo) ?? 'riposo'
-    const nextTipo = nextTurno(currentTipo, emp, isDomenica, isMD)
-    const orario = nextTipo !== 'riposo' ? (isMD ? ORARI_TURNO_MD[nextTipo] : ORARI_TURNO[nextTipo]) : null
-
-    // Aggiornamento ottimistico
-    if (existing) {
-      setShifts(prev => prev.map(s =>
-        s.employee_id === empId && s.data === data
-          ? { ...s, tipo: nextTipo, ora_inizio: orario?.inizio, ora_fine: orario?.fine }
-          : s
-      ))
-    } else {
-      const optimistic: Shift = {
-        id: `temp-${empId}-${data}`,
-        schedule_id: schedule.id,
-        employee_id: empId,
-        data,
-        tipo: nextTipo,
-        ora_inizio: orario?.inizio,
-        ora_fine: orario?.fine,
-      }
-      setShifts(prev => [...prev, optimistic])
-    }
-
-    // Persist su Supabase
-    if (existing) {
-      await supabase.from('shifts').update({ tipo: nextTipo, ora_inizio: orario?.inizio ?? null, ora_fine: orario?.fine ?? null }).eq('id', existing.id)
-    } else {
-      const { data: newShift } = await supabase.from('shifts')
-        .insert({ schedule_id: schedule.id, employee_id: empId, data, tipo: nextTipo, ora_inizio: orario?.inizio ?? null, ora_fine: orario?.fine ?? null })
-        .select().single()
-      if (newShift) {
-        setShifts(prev => prev.map(s =>
-          s.id === `temp-${empId}-${data}` ? newShift : s
-        ))
-      }
     }
   }
 
@@ -915,7 +813,7 @@ Puoi:
     '17/20',
   ]
 
-  /** Orari validi per il popup cella MD — stessa lista completa per tutti i dipendenti,
+  /** Orari validi per il popup cella — stessa lista completa per tutti i dipendenti,
    * indipendentemente dal contratto (vedi nota FIX 3 sopra). Il parametro oreSettimanali
    * non è più usato per filtrare, ma resta nella firma per non toccare il call site. */
   function getOrariValidi(_oreSettimanali: number): string[] {
@@ -1042,23 +940,19 @@ Puoi:
     <div className="min-h-screen bg-gray-50 p-4">
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-6">
-          {isMD ? (
-            <div className="flex items-center gap-3">
-              <img
-                src="/MD_Italia_Logo.svg.jpg"
-                alt="MD Logo"
-                className="h-12 w-auto"
-              />
-              <div>
-                <h1 className="text-xl font-bold text-gray-800 leading-tight">
-                  Generatore di Turni — Lanciano
-                </h1>
-                <p className="text-xs text-gray-400">by Maia &amp; Giacomo</p>
-              </div>
+          <div className="flex items-center gap-3">
+            <img
+              src="/MD_Italia_Logo.svg.jpg"
+              alt="MD Logo"
+              className="h-12 w-auto"
+            />
+            <div>
+              <h1 className="text-xl font-bold text-gray-800 leading-tight">
+                Generatore di Turni — Lanciano
+              </h1>
+              <p className="text-xs text-gray-400">by Maia &amp; Giacomo</p>
             </div>
-          ) : (
-            <h1 className="text-2xl font-bold text-gray-800">📅 Gestione Turni</h1>
-          )}
+          </div>
           <button onClick={logout}
             className="text-sm text-gray-500 hover:text-gray-700 border rounded-lg px-3 py-1.5 hover:bg-gray-50 transition">
             Esci
@@ -1074,7 +968,7 @@ Puoi:
             {[2025,2026,2027].map(a => <option key={a} value={a}>{a}</option>)}
           </select>
 
-          {isMD && schedule && (
+          {schedule && (
             <select
               className="border rounded px-3 py-2 bg-white text-gray-800"
               value={settimanaSelezionata}
@@ -1086,19 +980,19 @@ Puoi:
               ))}
             </select>
           )}
-          {isMD && settimanaAttiva && schedule && (
+          {settimanaAttiva && schedule && (
             <button onClick={generaSettimana} disabled={loading}
               className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50">
               {loading ? 'Generando...' : '⚡ Genera settimana'}
             </button>
           )}
-          {isMD && settimanaAttiva && schedule && (
+          {settimanaAttiva && schedule && (
             <button onClick={resetSettimana} disabled={loading}
               className="bg-red-100 text-red-600 px-4 py-2 rounded hover:bg-red-200 border border-red-200 disabled:opacity-50">
               🗑️ Reset settimana
             </button>
           )}
-          {isMD && settimanaAttiva && (
+          {settimanaAttiva && (
             <button onClick={lavoraSuSettimana}
               className="bg-purple-700 text-white px-4 py-2 rounded hover:bg-purple-800 flex items-center gap-2">
               ✨ Lavora su questa settimana
@@ -1115,19 +1009,19 @@ Puoi:
                 className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50">
                 {loading ? 'Generando...' : '⚡ Genera turni'}
               </button>
-              {isMD && shifts.length > 0 && (
+              {shifts.length > 0 && (
                 <button onClick={controllaTurni}
                   className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 flex items-center gap-2">
                   🔍 Controlla turni
                 </button>
               )}
-              {isMD && shifts.length > 0 && (
+              {shifts.length > 0 && (
                 <button onClick={() => { setSettimanaChiusure(0); setShowChiusure(true) }}
                   className="bg-slate-700 text-white px-4 py-2 rounded hover:bg-slate-800 flex items-center gap-2">
                   🔒 Chiusure
                 </button>
               )}
-              {isMD && shifts.length > 0 && (
+              {shifts.length > 0 && (
                 <button onClick={() => { setSettimanaMezzogiorno(0); setShowMezzogiorno(true) }}
                   className="bg-slate-700 text-white px-4 py-2 rounded hover:bg-slate-800 flex items-center gap-2">
                   🕐 Mezzogiorno
@@ -1180,22 +1074,12 @@ Puoi:
                 value={newEmp.nome} onChange={e => setNewEmp({...newEmp, nome: e.target.value})} />
               <select className="border rounded px-3 py-2 text-sm"
                 value={newEmp.ore_settimanali} onChange={e => setNewEmp({...newEmp, ore_settimanali: +e.target.value})}>
-                {isMD ? (
-                  <>
-                    <option value={22}>22h/sett</option>
-                    <option value={28}>28h/sett</option>
-                    <option value={30}>30h/sett</option>
-                    <option value={35}>35h/sett</option>
-                    <option value={36}>36h/sett</option>
-                    <option value={46}>46h/sett</option>
-                  </>
-                ) : (
-                  <>
-                    <option value={20}>20h/sett</option>
-                    <option value={30}>30h/sett</option>
-                    <option value={40}>40h/sett</option>
-                  </>
-                )}
+                <option value={22}>22h/sett</option>
+                <option value={28}>28h/sett</option>
+                <option value={30}>30h/sett</option>
+                <option value={35}>35h/sett</option>
+                <option value={36}>36h/sett</option>
+                <option value={46}>46h/sett</option>
               </select>
               <button onClick={addEmployee} className="bg-gray-800 text-white px-4 py-2 rounded text-sm hover:bg-gray-700">
                 Aggiungi
@@ -1257,7 +1141,7 @@ Puoi:
         </div>
 
         {/* Banner avvisi ore in eccesso rispetto al contratto */}
-        {isMD && shifts.length > 0 && employees.filter(emp => {
+        {shifts.length > 0 && employees.filter(emp => {
           const settimane = getSettimaneLunDom(giorni, mese)
           return settimane.some(sett => {
             const ore = sett.giorni.reduce((sum, g) => sum + oreLavorateGiorno(emp.id, g.data), 0)
@@ -1277,7 +1161,7 @@ Puoi:
                 <tr className="border-b">
                   <th className="text-left p-3 font-semibold text-gray-700 sticky left-0 bg-white min-w-32">Dipendente</th>
                   {Array.from({ length: offsetLunedi }).map((_, i) => (
-                    <th key={`empty-h-${i}`} className={`p-2 text-center ${isMD ? 'min-w-14' : 'min-w-10'} bg-gray-50 border-b`}>
+                    <th key={`empty-h-${i}`} className="p-2 text-center min-w-14 bg-gray-50 border-b">
                       <div className={`text-xs ${i >= 5 ? 'text-red-300' : 'text-gray-300'}`}>
                         {['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom'][i]}
                       </div>
@@ -1285,15 +1169,15 @@ Puoi:
                   ))}
                   {giorniOrdinati.map(g => {
                     const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
-                    const nomeFestivo = isMD ? festiviMap[g.data] : undefined
+                    const nomeFestivo = festiviMap[g.data]
                     return (
                       <Fragment key={g.data}>
-                        <th className={`p-2 text-center font-medium ${isMD ? 'min-w-14' : 'min-w-10'} ${g.domenica || nomeFestivo ? 'bg-red-50 text-red-400' : 'text-gray-600'} ${inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''}`}>
+                        <th className={`p-2 text-center font-medium min-w-14 ${g.domenica || nomeFestivo ? 'bg-red-50 text-red-400' : 'text-gray-600'} ${inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''}`}>
                           <div className="text-xs">{g.giorno}</div>
                           <div className="text-xs text-gray-400">{g.num}</div>
                           {nomeFestivo && <div className="text-xs text-purple-500">{nomeFestivo}</div>}
                         </th>
-                        {isMD && g.domenica && (
+                        {g.domenica && (
                           <th className="p-2 text-center font-semibold text-gray-700 bg-gray-50 min-w-16">TOT</th>
                         )}
                       </Fragment>
@@ -1310,7 +1194,7 @@ Puoi:
                         className="text-left hover:text-blue-600 transition-colors">
                         <div>{emp.nome}</div>
                         <div className="text-xs text-gray-400">
-                          {emp.ore_settimanali}h{isMD && emp.ruolo ? ` • ${emp.ruolo === 'cassiere' ? 'cassiere' : 'non cassiere'}` : ''}
+                          {emp.ore_settimanali}h{emp.ruolo ? ` • ${emp.ruolo === 'cassiere' ? 'cassiere' : 'non cassiere'}` : ''}
                         </div>
                       </button>
                     </td>
@@ -1321,9 +1205,9 @@ Puoi:
                       const shift = getShift(emp.id, g.data)
                       const tipo = shift?.tipo || 'riposo'
                       const isPermesso = hasUnavailability(emp.id, g.data)
-                      const nomeFestivo = isMD ? festiviMap[g.data] : undefined
-                      const domenicaBloccata = (g.domenica && !isMD) || !!nomeFestivo
-                      const cellBg = g.domenica || nomeFestivo ? (isMD ? 'bg-purple-50' : 'bg-red-50') : ''
+                      const nomeFestivo = festiviMap[g.data]
+                      const domenicaBloccata = !!nomeFestivo
+                      const cellBg = g.domenica || nomeFestivo ? 'bg-purple-50' : ''
                       const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
                       const bordoSettimana = inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''
 
@@ -1353,8 +1237,8 @@ Puoi:
                         // (sequenza 1=mattina, 2=pomeriggio): mostrale impilate invece del
                         // singolo turno normale, colore distintivo fucsia per riconoscerle
                         // a colpo d'occhio.
-                        const shiftsGiorno = isMD ? getShiftsForDay(emp.id, g.data) : []
-                        if (isMD && shiftsGiorno.length === 2) {
+                        const shiftsGiorno = getShiftsForDay(emp.id, g.data)
+                        if (shiftsGiorno.length === 2) {
                           const [blMattina, blPomeriggio] = shiftsGiorno
                           return (
                             <td className={`p-1 text-center ${cellBg} ${bordoSettimana}`}>
@@ -1368,9 +1252,9 @@ Puoi:
                                 title="Turno spezzato — click per modificare"
                                 className="inline-block px-1 py-0.5 rounded hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap bg-fuchsia-100 text-fuchsia-800">
                                 <div className="flex flex-col items-center leading-tight text-xs">
-                                  <div className="font-medium">{getOreDisplay(blMattina.tipo, blMattina)}h {getTurnoDisplay(blMattina.tipo, isMD, blMattina)}</div>
+                                  <div className="font-medium">{getOreDisplay(blMattina.tipo, blMattina)}h {getTurnoDisplay(blMattina.tipo, blMattina)}</div>
                                   <div className="border-t border-fuchsia-300 w-full my-0.5" />
-                                  <div className="font-medium">{getOreDisplay(blPomeriggio.tipo, blPomeriggio)}h {getTurnoDisplay(blPomeriggio.tipo, isMD, blPomeriggio)}</div>
+                                  <div className="font-medium">{getOreDisplay(blPomeriggio.tipo, blPomeriggio)}h {getTurnoDisplay(blPomeriggio.tipo, blPomeriggio)}</div>
                                 </div>
                               </button>
                             </td>
@@ -1381,30 +1265,26 @@ Puoi:
                             <button
                               onClick={(e) => {
                                 if (domenicaBloccata) return
-                                if (isMD) {
-                                  const rect = e.currentTarget.getBoundingClientRect()
-                                  setPopupCell({ empId: emp.id, data: g.data, x: rect.left, y: rect.bottom })
-                                } else {
-                                  cycleShift(emp.id, g.data)
-                                }
+                                const rect = e.currentTarget.getBoundingClientRect()
+                                setPopupCell({ empId: emp.id, data: g.data, x: rect.left, y: rect.bottom })
                               }}
                               disabled={domenicaBloccata}
-                              title={isMD ? `Click per scegliere orario (attuale: ${tipo})` : `Click per cambiare (attuale: ${tipo})`}
+                              title={`Click per scegliere orario (attuale: ${tipo})`}
                               className={`inline-block px-1 py-0.5 rounded hover:opacity-80 disabled:cursor-not-allowed whitespace-nowrap ${TURNO_COLOR[tipo]}`}>
-                              {isMD && tipo !== 'riposo' ? (
+                              {tipo !== 'riposo' ? (
                                 <div className="flex flex-col items-center leading-tight">
                                   <span className="text-xs font-bold text-gray-500">{getOreDisplay(tipo, shift)}h</span>
-                                  <span className="text-xs font-medium">{getTurnoDisplay(tipo, isMD, shift)}</span>
+                                  <span className="text-xs font-medium">{getTurnoDisplay(tipo, shift)}</span>
                                 </div>
                               ) : (
-                                <span className="text-xs font-bold">{getTurnoDisplay(tipo, isMD, shift)}</span>
+                                <span className="text-xs font-bold">{getTurnoDisplay(tipo, shift)}</span>
                               )}
                             </button>
                           </td>
                         )
                       })()
 
-                      const showTot = isMD && g.domenica
+                      const showTot = g.domenica
                       const tot = showTot ? totSettimana(emp.id, g.data) : 0
                       const haUsatoFerie = showTot && haUsatoFerieSettimana(emp.id, g.data)
                       const saldoEmp = ferieSaldi[emp.id]
@@ -1429,14 +1309,9 @@ Puoi:
               </tbody>
             </table>
             <div className="p-3 text-xs text-gray-400 flex gap-4 flex-wrap">
-              {/* Stroili: le celle mostrano ancora lettere (M/Pm/F), la legenda resta utile. */}
-              {!isMD && <span><strong>M</strong> = Mattina 9-14</span>}
-              {!isMD && <span><strong>Pm</strong> = Pomeriggio 14-20</span>}
-              {!isMD && <span><strong>F</strong> = Full 9-20</span>}
-              {!isMD && <span><strong>—</strong> = Riposo</span>}
-              {/* MD: le celle mostrano già gli orari — nessuna voce turno in legenda, solo assenze. */}
-              {isMD && <span className="text-pink-700">11/14, 12/15, 13/16, 17/20 = Turno breve (3h)</span>}
-              {isMD && <span className="text-fuchsia-700">✂️ = Turno spezzato (mattina 08:00-x + pomeriggio x-20:00)</span>}
+              {/* Le celle mostrano già gli orari — nessuna voce turno in legenda, solo assenze. */}
+              <span className="text-pink-700">11/14, 12/15, 13/16, 17/20 = Turno breve (3h)</span>
+              <span className="text-fuchsia-700">✂️ = Turno spezzato (mattina 08:00-x + pomeriggio x-20:00)</span>
               <span><strong className="text-yellow-700">F</strong><span className="text-yellow-700"> = Ferie</span></span>
               <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
               <span><strong className="text-yellow-700">REC</strong><span className="text-yellow-700"> = Recupero</span></span>
@@ -1446,7 +1321,7 @@ Puoi:
           </div>
         )}
 
-        {/* Popup orari validi — sostituisce il click ciclico per MD (rispetta i limiti ore contratto) */}
+        {/* Popup orari validi — rispetta i limiti ore contratto */}
         {popupCell && (() => {
           const emp = employees.find(e => e.id === popupCell.empId)
           if (!emp) return null
@@ -1462,12 +1337,10 @@ Puoi:
                     {orario}
                   </button>
                 ))}
-                {isMD && (
-                  <button onClick={() => { setModalSpezzato({ empId: popupCell.empId, data: popupCell.data }); setPopupCell(null) }}
-                    className="block w-full text-left px-3 py-1 hover:bg-fuchsia-50 text-sm rounded border-t mt-1 pt-2 text-fuchsia-700 whitespace-nowrap">
-                    ✂️ Dividi turno (mattina + pomeriggio)
-                  </button>
-                )}
+                <button onClick={() => { setModalSpezzato({ empId: popupCell.empId, data: popupCell.data }); setPopupCell(null) }}
+                  className="block w-full text-left px-3 py-1 hover:bg-fuchsia-50 text-sm rounded border-t mt-1 pt-2 text-fuchsia-700 whitespace-nowrap">
+                  ✂️ Dividi turno (mattina + pomeriggio)
+                </button>
               </div>
             </>
           )
@@ -1525,7 +1398,7 @@ Puoi:
         })()}
 
         {/* Pannello laterale "Chiusure" — copertura chiusura 20:00 per settimana (Lun-Sab) */}
-        {showChiusure && isMD && (() => {
+        {showChiusure && (() => {
           const settimane = getSettimaneLunDom(giorni, mese)
           const idx = Math.min(Math.max(settimanaChiusure, 0), Math.max(settimane.length - 1, 0))
           const settimana = settimane[idx]
@@ -1588,7 +1461,7 @@ Puoi:
         })()}
 
         {/* Pannello laterale "Mezzogiorno" — copertura fascia 12:00-14:00 per settimana (Lun-Sab) */}
-        {showMezzogiorno && isMD && (() => {
+        {showMezzogiorno && (() => {
           const settimane = getSettimaneLunDom(giorni, mese)
           const idx = Math.min(Math.max(settimanaMezzogiorno, 0), Math.max(settimane.length - 1, 0))
           const settimana = settimane[idx]
@@ -1687,7 +1560,7 @@ Puoi:
               <button onClick={() => setDettaglioEmp(null)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
             </div>
 
-            {isMD && ferieSaldi[dettaglioEmp.id] && (() => {
+            {ferieSaldi[dettaglioEmp.id] && (() => {
               const s = ferieSaldi[dettaglioEmp.id]
               return (
                 <div className="flex gap-4 mb-4 p-3 bg-gray-50 rounded-lg">
@@ -1805,7 +1678,6 @@ Puoi:
       )}
 
       <MaiaChatBubble
-        isMD={isMD}
         storeNome={storeNome}
         storeId={storeId}
         scheduleId={schedule?.id ?? null}
