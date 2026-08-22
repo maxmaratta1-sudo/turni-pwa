@@ -444,3 +444,113 @@ dedicata nel PDF (`didParseCell`, check su `val.includes('\n')`).
 i fix precedenti in questo file) — bottone "Dividi turno", modal, cella impilata e PDF
 non sono stati click-testati nella UI reale, solo a livello DB tramite route di debug
 (creata, testata, poi rimossa — confermato 404 dopo la rimozione).
+
+---
+
+## 4 fix urgenti — chiusura, fascia 13-16, bilanciamento mattina/pomeriggio, sposta riposo Maia (21 agosto 2026)
+
+### FIX 1 — Chiusura 20:00: "a volte solo 2 persone invece di 3"
+
+**Verificato su 6 mesi di dati reali** (luglio-dicembre 2026, via route di debug
+temporanea che genera in memoria con `generateShiftsMD` senza scrivere su DB): **zero
+casi** di sotto-copertura chiusura generati dal codice, festivi esclusi correttamente
+dal check. Test sintetico con assenze forzate crescenti: serve che **8 dipendenti su 13
+siano assenti lo stesso giorno** prima che `correggiChiusura` non riesca più a coprire —
+scenario irrealistico per ferie/assenze normali. L'ipotesi iniziale ("pool eroso dalle
+ferie") non regge sotto test.
+
+**Bug reale trovato e corretto**: `correggiChiusura` non loggava MAI un warning quando
+falliva a raggiungere il minimo (a differenza di `correggiFasciaCentrale`, che lo fa) —
+fallimento silenzioso confermato, ora corretto. Aggiunta anche l'esclusione domenica/
+festivi dal check (mancava — senza `festiviSet` esplicito ogni domenica/festivo con
+tutti a riposo avrebbe generato un falso warning).
+
+**Sospetto più probabile per le segnalazioni reali di Giacomo** (non risolto qui, fuori
+scope — richiederebbe toccare `maia-chat/route.ts`): modifiche manuali post-generazione
+(update_shift via Maia, o click diretto in manager/page.tsx) NON ri-eseguono
+`correggiChiusura` — quel pass gira solo dentro `generateShiftsMD`/`generateShiftsMDWeek`.
+Se Giacomo sposta un turno dopo aver generato, la copertura chiusura di quel giorno può
+rompersi senza che nessuna verifica lo segnali. Da investigare se il problema si ripete.
+
+### FIX 2 — Fascia 13:00-16:00: da verifica a correzione reale
+
+`verificaFasciaObbligatoria` (solo `console.warn`, mai correggeva — commento originale:
+"un vero auto-fix richiederebbe un constraint solver") sostituita da
+`correggiFasciaObbligatoria`, stesso pattern di `correggiFasciaCentrale` (12-14):
+converte il turno di una cassiera candidata (mai Yuri, mai `non_cassiere`, mai
+flessibilità "Nessuna") in un orario che copre 13-16 per intero, cercato in
+`config.legenda_orari`. La regola "Yuri + 1 altro quando lavora, 2 cassieri qualsiasi
+quando assente" emerge naturalmente dal conteggio — non serve logica dedicata per
+distinguere i due casi, la presenza di Yuri (quando lavora) conta già nel totale.
+
+### FIX 3 — Bilanciamento mattina ≥ pomeriggio
+
+Nuovo pass `correggiBilanciamentoMattinaPomeriggio`: la mattina deve avere sempre almeno
+lo stesso numero di persone del pomeriggio, conteggio totale giornaliero. "Mattina"/
+"pomeriggio" classificati dall'**orario effettivo** (`ora_inizio < 14:00` /
+`ora_fine > 14:00`), non dalla stringa `tipo` (troppo variabile tra i rami del
+generatore — mattina, mattina_corta, full, spezzato_mattina, valori "yuri_*" da
+config...) — un turno lungo (full, o Yuri se il pattern del giorno è più ampio di 13-16)
+conta in entrambi, uno spezzato conta una volta per riga. Esclude Yuri e Gilda/Tony
+(`pattern_standard.lun_sab`, fissi mattina per contratto).
+Aggiunta a `turni_config.regole_generali.bilanciamento_mattina_pomeriggio` (Supabase, via
+route di debug temporanea POST — merge, altri campi preservati):
+```json
+{"regola": "La mattina deve avere sempre almeno lo stesso numero di persone del pomeriggio, di norma 1 in più", "applicabile": "conteggio totale giornaliero, tutti i reparti/ruoli"}
+```
+
+**🐛 Bug trovato e corretto PRIMA del deploy finale** (mai arrivato in produzione — la
+verifica sistematica sui 6 mesi lo ha beccato subito): sia `correggiFasciaObbligatoria`
+(FIX 2) sia `correggiBilanciamentoMattinaPomeriggio` (FIX 3), girando DOPO
+`correggiChiusura`, potevano "rubare" esattamente il turno che finiva alle 20:00 e che
+`correggiChiusura` aveva appena spostato lì per raggiungere il minimo — convertendolo di
+nuovo (a un orario centrale 13-16, o a mattina per il bilanciamento) e riportando la
+chiusura sotto il minimo. Prima correzione (solo bilanciamento): violazioni chiusura
+invariate (18 su 6 mesi) — root cause vera trovata in `correggiFasciaObbligatoria`, non
+nel bilanciamento. Fix: entrambe le funzioni ora escludono dai candidati un turno che
+finisce alle 20:00 SE la copertura chiusura di quel giorno è già al minimo, con un
+contatore live decrementato ad ogni conversione reale (non solo un check statico
+all'inizio). **Verificato**: 0 violazioni su tutti e tre i criteri (chiusura, fascia
+13-16, bilanciamento), 184 giorni reali su 6 mesi, dopo il fix.
+
+### FIX 4 — Maia: cambio riposo infrasettimanale (`sposta_riposo`)
+
+Nuovo tool `sposta_riposo` (employee_name, vecchio_giorno, nuovo_giorno) —
+esplicitamente separato dal riposo compensativo domenicale (regole diverse, tool diverso,
+system prompt aggiornato per non confonderli). Ripristina un turno di lavoro standard nel
+vecchio giorno, mette a riposo il nuovo giorno.
+
+Il turno "standard" è calcolato da una nuova funzione esportata in `generator.ts`,
+`calcolaTurnoStandardGiorno(emp, config, storeId, dataStr)` — **riusa gli stessi helper
+del generatore vero** (`findDip`, `chiMattinaMaxRomeo`, `direzioneSabatoFormula`,
+`orarioMattina`/`Pomeriggio`/`FromSlug`) invece di duplicare la logica. Deliberatamente
+NON chiama `generateShiftsMD` con un solo dipendente: farlo applicherebbe i pass di
+correzione (chiusura, fasce, bilanciamento) a un quadro artificialmente parziale (1 sola
+persona), rischiando conversioni sbagliate basate su un conteggio fasullo.
+
+Copertura fedele al 100% per i pattern **calcolabili in isolamento** (non serve il
+contesto dell'intera settimana): R1 Gilda/Tony, Yuri, Denise, Max/Romeo (alternanza AB),
+Cristina/Stefania. Per **Carlo e le cassiere 22h** (distribuzione ore dinamica —
+`distribuisciOre`/`distribuisciCassiere22Settimana` — richiedono di sapere quante ore
+restano da spalmare sui giorni rimasti della settimana, non calcolabile per un giorno
+isolato) usa un **fallback semplificato e documentato** (mattina, ore =
+`max_ore_giorno`) — se serve esattezza per questi dipendenti specifici, rigenerare la
+settimana con `generateShiftsMDWeek` invece di usare `sposta_riposo`.
+
+**Testato**: `calcolaTurnoStandardGiorno` chiamata via route di debug per Romeo su un
+mercoledì reale (dicembre 2026) → `{tipo: "pomeriggio", orario: "15:00-20:00"}`,
+plausibile per il suo contratto 28h e l'alternanza AB attiva quella settimana. **Non
+testato end-to-end il comando reale a Maia** ("Cambia il riposo di [nome] da [giorno] a
+[giorno]") — avrebbe richiesto scrivere su dati di produzione senza essere quello il tipo
+di verifica autorizzata in questa sessione; il tool è pronto e deployato, il test live va
+fatto da Giacomo/Max sulla chat reale.
+
+### Verifica complessiva
+
+Route di debug temporanea (`generateShiftsMD` in memoria, nessuna scrittura) su 6
+schedule mensili reali consecutivi (luglio-dicembre 2026): **0 violazioni chiusura, 0
+violazioni fascia 13-16, 0 violazioni bilanciamento mattina/pomeriggio** dopo tutti i fix
+e la correzione del bug di interazione tra i pass. `npx tsc --noEmit` pulito ad ogni
+step. Route di debug rimossa e confermata 404 dopo l'uso.
+**⚠️ Non verificato via click nel browser** (stesso limite login email/password
+ricorrente in questo file) — verificato solo a livello di generazione/DB.
