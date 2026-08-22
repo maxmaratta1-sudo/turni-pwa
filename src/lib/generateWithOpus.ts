@@ -109,7 +109,10 @@ giorni non lavorati, incluse le indisponibilità).`,
  * settimana per un singolo nome sbagliato, ma nemmeno le salviamo alla cieca. */
 export function resolveOpusShifts(
   turni: OpusShiftOut[],
-  scheduleId: string,
+  // Settimane a cavallo (25/08/2026): era un `scheduleId: string` fisso, stampato su ogni
+  // riga a prescindere dalla data — sbagliato per una settimana che tocca due mesi/schedule
+  // diversi. Ora un resolver per-data, coerente con generateShiftsMDWeek.
+  scheduleIdForData: (data: string) => string,
   employees: Employee[]
 ): Omit<Shift, 'id' | 'created_at'>[] {
   const byNome = new Map(employees.map(e => [e.nome.trim().toLowerCase(), e]))
@@ -122,7 +125,7 @@ export function resolveOpusShifts(
       continue
     }
     result.push({
-      schedule_id: scheduleId,
+      schedule_id: scheduleIdForData(t.data),
       employee_id: emp.id,
       data: t.data,
       tipo: t.tipo as Shift['tipo'],

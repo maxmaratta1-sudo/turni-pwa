@@ -138,8 +138,21 @@ export default function ManagerPage() {
   const [anno, setAnno] = useState(2026)
   const [employees, setEmployees] = useState<Employee[]>([])
   const [schedule, setSchedule] = useState<Schedule | null>(null)
+  // Settimane a cavallo tra due mesi (25/08/2026): lo schedule del mese precedente/
+  // successivo, letti in sola lettura per sapere se esistono già (creati al bisogno solo
+  // da generaSettimana/resetSettimana via ensureSchedule, mai qui) — vedi scheduleIdFor.
+  const [schedulePrev, setSchedulePrev] = useState<Schedule | null>(null)
+  const [scheduleNext, setScheduleNext] = useState<Schedule | null>(null)
   const [shifts, setShifts] = useState<Shift[]>([])
   const [unavailabilities, setUnavailabilities] = useState<Unavailability[]>([])
+  // Turni/permessi dei soli giorni di "bordo" (fino a 6 gg finali del mese precedente +
+  // fino a 6 gg iniziali del successivo) che possono comparire in una settimana a cavallo
+  // con il mese corrente — combinati con shifts/unavailabilities in getShift/hasUnavailability
+  // così i pannelli/report settimanali vedono l'intera settimana reale, non solo il mese
+  // corrente. La vista mensile normale continua a usare `shifts`/`unavailabilities` da soli
+  // via i filtri per data, quindi non è affetta da questa aggiunta.
+  const [shiftsBordo, setShiftsBordo] = useState<Shift[]>([])
+  const [unavailabilitiesBordo, setUnavailabilitiesBordo] = useState<Unavailability[]>([])
   const [loading, setLoading] = useState(false)
   const [newEmp, setNewEmp] = useState({ nome: '', ore_settimanali: 20 })
   const [showAddForm, setShowAddForm] = useState(false)
@@ -177,7 +190,13 @@ export default function ManagerPage() {
   // ma l'ordine dei giorni non cambia mai).
   const giorniOrdinati = giorni
   const offsetLunedi = getOffsetLunedi(anno, mese)
-  const settimaneMese = getSettimaneLunDom(giorni, mese)
+  // Settimane a cavallo (25/08/2026): ogni giorno porta anche lo schedule_id risolto
+  // (null se lo schedule di quel mese non esiste ancora — verrà creato al bisogno da
+  // generaSettimana/resetSettimana tramite ensureSchedule).
+  const settimaneMese = getSettimaneLunDomEstese(anno, mese).map(s => ({
+    ...s,
+    giorni: s.giorni.map(g => ({ ...g, scheduleId: scheduleIdFor(g.mese, g.anno) })),
+  }))
   const settimanaAttiva = settimanaSelezionata !== '' ? settimaneMese[settimanaSelezionata] : null
 
   useEffect(() => {
@@ -253,6 +272,19 @@ export default function ManagerPage() {
       if (schedErr) { setError(`schedules: ${schedErr.message}`); setLoading(false); return }
       setSchedule(sched)
 
+      // Settimane a cavallo (25/08/2026): schedule dei mesi adiacenti, in sola lettura —
+      // se non esistono ancora (mai creato "Crea piano mese" per quel mese) restano null,
+      // verranno creati al bisogno solo quando si genera/resetta davvero una settimana che
+      // li tocca (ensureSchedule), mai qui.
+      const { mese: prevMese, anno: prevAnno } = meseAdiacente(mese, anno, -1)
+      const { mese: nextMese, anno: nextAnno } = meseAdiacente(mese, anno, 1)
+      const [{ data: schedPrev }, { data: schedNext }] = await Promise.all([
+        supabase.from('schedules').select('*').eq('store_id', storeId!).eq('mese', prevMese).eq('anno', prevAnno).maybeSingle(),
+        supabase.from('schedules').select('*').eq('store_id', storeId!).eq('mese', nextMese).eq('anno', nextAnno).maybeSingle(),
+      ])
+      setSchedulePrev(schedPrev)
+      setScheduleNext(schedNext)
+
       if (sched) {
         const { data: sh } = await supabase.from('shifts').select('*').eq('schedule_id', sched.id)
         setShifts(sh || [])
@@ -264,6 +296,20 @@ export default function ManagerPage() {
         setShifts([])
         setUnavailabilities([])
       }
+
+      // Solo i giorni di bordo (fino a 6 finali del mese prima / 6 iniziali del dopo) che
+      // possono ricadere in una settimana a cavallo — non l'intero mese adiacente, per non
+      // appesantire il caricamento.
+      const bordoPrevRange = schedPrev ? giorniBordo(prevAnno, prevMese, 'coda') : null
+      const bordoNextRange = schedNext ? giorniBordo(nextAnno, nextMese, 'testa') : null
+      const [shBordoPrev, shBordoNext, unavBordoPrev, unavBordoNext] = await Promise.all([
+        bordoPrevRange ? supabase.from('shifts').select('*').eq('schedule_id', schedPrev!.id).gte('data', bordoPrevRange.inizio).lte('data', bordoPrevRange.fine) : Promise.resolve({ data: [] as Shift[] }),
+        bordoNextRange ? supabase.from('shifts').select('*').eq('schedule_id', schedNext!.id).gte('data', bordoNextRange.inizio).lte('data', bordoNextRange.fine) : Promise.resolve({ data: [] as Shift[] }),
+        bordoPrevRange ? supabase.from('unavailabilities').select('*').eq('schedule_id', schedPrev!.id).gte('data', bordoPrevRange.inizio).lte('data', bordoPrevRange.fine) : Promise.resolve({ data: [] as Unavailability[] }),
+        bordoNextRange ? supabase.from('unavailabilities').select('*').eq('schedule_id', schedNext!.id).gte('data', bordoNextRange.inizio).lte('data', bordoNextRange.fine) : Promise.resolve({ data: [] as Unavailability[] }),
+      ])
+      setShiftsBordo([...(shBordoPrev.data || []), ...(shBordoNext.data || [])])
+      setUnavailabilitiesBordo([...(unavBordoPrev.data || []), ...(unavBordoNext.data || [])])
     } catch (e: any) {
       setError(`Errore: ${e?.message ?? String(e)}`)
     }
@@ -274,6 +320,35 @@ export default function ManagerPage() {
     const { data } = await supabase.from('schedules')
       .insert({ store_id: storeId!, mese, anno, stato: 'bozza' }).select().single()
     setSchedule(data)
+  }
+
+  /** Get-or-create per lo schedule di un mese/anno qualsiasi (25/08/2026, settimane a
+   * cavallo) — a differenza di createSchedule (sempre sul mese correntemente in state,
+   * usato dal bottone "Crea piano mese"), questa serve a generaSettimana/resetSettimana
+   * per garantire che esista lo schedule del mese ADIACENTE quando la settimana attiva lo
+   * tocca, senza richiedere a Giacomo di crearlo manualmente prima. Non aggiorna lo state
+   * schedule/schedulePrev/scheduleNext — il chiamante fa sempre loadData() dopo, che li
+   * ricarica tutti da zero. */
+  async function ensureSchedule(m: number, a: number): Promise<Schedule> {
+    const { data: existing } = await supabase.from('schedules')
+      .select('*').eq('store_id', storeId!).eq('mese', m).eq('anno', a).maybeSingle()
+    if (existing) return existing
+    const { data: created, error } = await supabase.from('schedules')
+      .insert({ store_id: storeId!, mese: m, anno: a, stato: 'bozza' }).select().single()
+    if (error || !created) throw new Error(`Impossibile creare lo schedule per ${MESI[m - 1]} ${a}: ${error?.message ?? 'errore sconosciuto'}`)
+    return created
+  }
+
+  /** Risolve lo schedule_id per un giorno di {mese, anno} qualsiasi rispetto al mese
+   * correntemente aperto (mese/anno in state) — usa schedule/schedulePrev/scheduleNext,
+   * null se quel mese non ha ancora uno schedule creato. */
+  function scheduleIdFor(gMese: number, gAnno: number): string | null {
+    if (gMese === mese && gAnno === anno) return schedule?.id ?? null
+    const prev = meseAdiacente(mese, anno, -1)
+    if (gMese === prev.mese && gAnno === prev.anno) return schedulePrev?.id ?? null
+    const next = meseAdiacente(mese, anno, 1)
+    if (gMese === next.mese && gAnno === next.anno) return scheduleNext?.id ?? null
+    return null
   }
 
   async function generateTurni() {
@@ -288,47 +363,77 @@ export default function ManagerPage() {
   }
 
   async function generaSettimana() {
-    if (!schedule || !settimanaAttiva) return
+    if (!settimanaAttiva) return
     const giorniLunSab = settimanaAttiva.giorni.filter(g => !g.domenica)
-    const weekStart = giorniLunSab[0]?.data
-    const weekEnd = giorniLunSab[giorniLunSab.length - 1]?.data
-    if (!weekStart || !weekEnd) return
+    if (giorniLunSab.length === 0) return
 
     setLoading(true)
-    const res = await fetch('/api/shifts/generate-week', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ schedule_id: schedule.id, week_start: weekStart, week_end: weekEnd })
-    })
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}))
-      setError(`Errore generazione settimana: ${data.error ?? res.statusText}`)
-    } else {
-      // Esce dalla modalità "editing settimana" dopo una generazione riuscita — il bordo
-      // blu segue sempre settimanaSelezionata, quindi resettandola sparisce di conseguenza
-      // (in caso di errore resta selezionata, per permettere di vedere cosa è fallito/riprovare).
-      setSettimanaSelezionata('')
+    try {
+      // Settimane a cavallo (25/08/2026): garantisce che esista lo schedule per OGNI mese
+      // toccato dalla settimana (di solito 1, a volte 2) — lo crea automaticamente se manca,
+      // invece di richiedere il click manuale su "Crea piano mese" per il mese adiacente.
+      const mesiCoinvolti = Array.from(new Set(giorniLunSab.map(g => `${g.anno}-${g.mese}`)))
+        .map(k => { const [a, m] = k.split('-').map(Number); return { anno: a, mese: m } })
+      const schedulePerChiave: Record<string, Schedule> = {}
+      for (const { anno: a, mese: m } of mesiCoinvolti) {
+        schedulePerChiave[`${a}-${m}`] = await ensureSchedule(m, a)
+      }
+      const giorniConSchedule = giorniLunSab.map(g => ({
+        data: g.data,
+        schedule_id: schedulePerChiave[`${g.anno}-${g.mese}`].id,
+      }))
+
+      const res = await fetch('/api/shifts/generate-week', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ giorni: giorniConSchedule }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setError(`Errore generazione settimana: ${data.error ?? res.statusText}`)
+      } else {
+        // Esce dalla modalità "editing settimana" dopo una generazione riuscita — il bordo
+        // blu segue sempre settimanaSelezionata, quindi resettandola sparisce di conseguenza
+        // (in caso di errore resta selezionata, per permettere di vedere cosa è fallito/riprovare).
+        setSettimanaSelezionata('')
+      }
+    } catch (e: any) {
+      setError(`Errore generazione settimana: ${e?.message ?? String(e)}`)
     }
     await loadData()
     setLoading(false)
   }
 
   async function resetSettimana() {
-    if (!schedule || !settimanaAttiva) return
-    const inizio = settimanaAttiva.giorni[0]?.data
-    const fine = settimanaAttiva.giorni[settimanaAttiva.giorni.length - 1]?.data
-    if (!inizio || !fine) return
+    if (!settimanaAttiva) return
     if (!window.confirm(`Cancellare turni e permessi della settimana ${settimanaAttiva.label}?`)) return
 
     setLoading(true)
-    await supabase.from('shifts').delete().eq('schedule_id', schedule.id).gte('data', inizio).lte('data', fine)
-    await supabase.from('unavailabilities').delete().eq('schedule_id', schedule.id).gte('data', inizio).lte('data', fine)
+    // Settimane a cavallo (25/08/2026): raggruppa i giorni per schedule_id — una settimana
+    // può toccare fino a 2 schedule diversi (uno per mese), ognuno va ripulito separatamente
+    // sul proprio intervallo di date reali, altrimenti i giorni dell'altro mese non
+    // verrebbero mai cancellati (o peggio, verrebbero cancellati sotto lo schedule_id
+    // sbagliato). I giorni il cui mese non ha ancora nessuno schedule vengono ignorati —
+    // non c'è nulla da cancellare per un mese mai generato.
+    const perSchedule = new Map<string, string[]>()
+    for (const g of settimanaAttiva.giorni) {
+      if (!g.scheduleId) continue
+      const arr = perSchedule.get(g.scheduleId) ?? []
+      arr.push(g.data)
+      perSchedule.set(g.scheduleId, arr)
+    }
+    for (const [schedId, date] of Array.from(perSchedule)) {
+      const inizio = date[0]
+      const fine = date[date.length - 1]
+      await supabase.from('shifts').delete().eq('schedule_id', schedId).gte('data', inizio).lte('data', fine)
+      await supabase.from('unavailabilities').delete().eq('schedule_id', schedId).gte('data', inizio).lte('data', fine)
+    }
     await loadData()
     setLoading(false)
   }
 
   function controllaTurni() {
-    const settimane = getSettimaneLunDom(giorni, mese)
+    const settimane = getSettimaneLunDomEstese(anno, mese)
 
     const riepilogoOre = employees.map(emp => {
       const orePerSettimana = settimane.map((sett, i) => {
@@ -375,7 +480,9 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
         .filter(({ shift }) => shift && shift.tipo !== 'riposo')
       const oreTot = giorniFeriali.reduce((sum, g) => sum + oreLavorateGiorno(emp.id, g.data), 0)
       const dettaglio = turniSett
-        .map(({ g, shift }) => `${g.giorno} ${g.num}: ${getTurnoDisplay(shift!.tipo, shift!)}`)
+        // Mese REALE del giorno, non quello aperto in UI (25/08/2026, settimane a cavallo)
+        // — un turno del 31 Agosto va etichettato "Agosto", non "Settembre".
+        .map(({ g, shift }) => `${g.giorno} ${g.num} ${MESI[g.mese - 1]}: ${getTurnoDisplay(shift!.tipo, shift!)}`)
         .join(', ')
       return `- ${emp.nome} (${emp.ore_settimanali}h contratto): ${oreTot}h assegnate${dettaglio ? ' — ' + dettaglio : ''}`
     }).join('\n')
@@ -385,14 +492,16 @@ Sii CONCISO — niente tabelle, niente ricostruzioni. Solo i problemi trovati.
         .map(emp => ({ emp, shift: getShift(emp.id, g.data) }))
         .filter(({ shift }) => shift && shift.tipo !== 'riposo')
       const elenco = lavoranti.map(({ emp, shift }) => `${emp.nome} (${getTurnoDisplay(shift!.tipo, shift!)})`).join(', ')
-      return `- ${g.num} ${MESI[mese - 1]}: ${elenco || 'nessuno assegnato'}`
+      return `- ${g.num} ${MESI[g.mese - 1]}: ${elenco || 'nessuno assegnato'}`
     }).join('\n')
 
     const primo = settimanaAttiva.giorni[0]
     const ultimo = settimanaAttiva.giorni[settimanaAttiva.giorni.length - 1]
+    // Se la settimana attraversa due mesi, entrambi vanno indicati esplicitamente.
+    const etichettaMese = primo.mese !== ultimo.mese ? `${MESI[primo.mese - 1]} — ${MESI[ultimo.mese - 1]}` : MESI[primo.mese - 1]
 
     const contestoSettimana = `
-Stiamo lavorando sulla settimana ${primo.giorno} ${primo.num} — ${ultimo.giorno} ${ultimo.num} ${MESI[mese - 1]}.
+Stiamo lavorando sulla settimana ${primo.giorno} ${primo.num} — ${ultimo.giorno} ${ultimo.num} ${etichettaMese}.
 
 SITUAZIONE ATTUALE QUESTA SETTIMANA:
 ${situazione}
@@ -441,7 +550,10 @@ Puoi:
     // tutti i chiamanti esistenti si aspettano un singolo turno, comportamento invariato
     // per i giorni normali (sequenza sempre 1 di default). Per i giorni spezzati, la
     // visualizzazione a due blocchi usa getShiftsForDay() sotto, non questa funzione.
-    return shifts
+    // Include shiftsBordo (25/08/2026, settimane a cavallo) — sicuro anche per la vista
+    // mensile normale: le date di bordo appartengono sempre a un mese diverso da quello
+    // corrente, quindi non collidono mai con le date filtrate qui.
+    return [...shifts, ...shiftsBordo]
       .filter(s => s.employee_id === empId && s.data === data)
       .sort((a, b) => (a.sequenza ?? 1) - (b.sequenza ?? 1))[0]
   }
@@ -449,7 +561,7 @@ Puoi:
   /** Tutti gli shift di un dipendente per un giorno, ordinati per sequenza — normalmente
    * 1 solo elemento, 2 per un giorno con turno spezzato (8 agosto 2026). */
   function getShiftsForDay(empId: string, data: string) {
-    return shifts
+    return [...shifts, ...shiftsBordo]
       .filter(s => s.employee_id === empId && s.data === data)
       .sort((a, b) => (a.sequenza ?? 1) - (b.sequenza ?? 1))
   }
@@ -595,7 +707,7 @@ Puoi:
   }
 
   async function exportPDFSettimana() {
-    const settimane = getSettimaneLunDom(giorni, mese)
+    const settimane = getSettimaneLunDomEstese(anno, mese)
     if (settimane.length === 0) { alert('Nessuna settimana disponibile per questo mese.'); return }
     const elenco = settimane.map((s, i) => `${i + 1}: ${s.label}`).join('\n')
     const input = window.prompt(`Quale settimana vuoi esportare?\n${elenco}`)
@@ -606,14 +718,15 @@ Puoi:
   }
 
   function hasUnavailability(empId: string, data: string) {
-    return unavailabilities.some(u => u.employee_id === empId && u.data === data)
+    // Include unavailabilitiesBordo (25/08/2026, settimane a cavallo) — vedi commento su getShift.
+    return [...unavailabilities, ...unavailabilitiesBordo].some(u => u.employee_id === empId && u.data === data)
   }
 
   // Tipo di assenza — colonna reale `tipo_assenza` (default 'P').
   const ASSENZA_CYCLE = ['P', 'F', 'R', 'M', 'MT'] as const
 
   function getAssenzaCode(empId: string, data: string): string {
-    const u = unavailabilities.find(x => x.employee_id === empId && x.data === data)
+    const u = [...unavailabilities, ...unavailabilitiesBordo].find(x => x.employee_id === empId && x.data === data)
     return u?.tipo_assenza ?? 'P'
   }
 
@@ -634,7 +747,7 @@ Puoi:
   // usate dall'algoritmo in generator.ts (che è invece corretto).
 
   function oreLavorateGiorno(empId: string, data: string): number {
-    const u = unavailabilities.find(x => x.employee_id === empId && x.data === data)
+    const u = [...unavailabilities, ...unavailabilitiesBordo].find(x => x.employee_id === empId && x.data === data)
     // Permesso a ore: il turno è accorciato, non azzerato — conta le ore effettivamente lavorate.
     if (u && !u.ore_parziali) return 0 // assenza a giornata intera = 0h lavorate
     // Turno spezzato (8 agosto 2026): un giorno può avere 2 righe (mattina+pomeriggio,
@@ -980,13 +1093,13 @@ Puoi:
               ))}
             </select>
           )}
-          {settimanaAttiva && schedule && (
+          {settimanaAttiva && (
             <button onClick={generaSettimana} disabled={loading}
               className="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 disabled:opacity-50">
               {loading ? 'Generando...' : '⚡ Genera settimana'}
             </button>
           )}
-          {settimanaAttiva && schedule && (
+          {settimanaAttiva && (
             <button onClick={resetSettimana} disabled={loading}
               className="bg-red-100 text-red-600 px-4 py-2 rounded hover:bg-red-200 border border-red-200 disabled:opacity-50">
               🗑️ Reset settimana
@@ -1142,7 +1255,7 @@ Puoi:
 
         {/* Banner avvisi ore in eccesso rispetto al contratto */}
         {shifts.length > 0 && employees.filter(emp => {
-          const settimane = getSettimaneLunDom(giorni, mese)
+          const settimane = getSettimaneLunDomEstese(anno, mese)
           return settimane.some(sett => {
             const ore = sett.giorni.reduce((sum, g) => sum + oreLavorateGiorno(emp.id, g.data), 0)
             return ore > emp.ore_settimanali + 1
@@ -1399,7 +1512,7 @@ Puoi:
 
         {/* Pannello laterale "Chiusure" — copertura chiusura 20:00 per settimana (Lun-Sab) */}
         {showChiusure && (() => {
-          const settimane = getSettimaneLunDom(giorni, mese)
+          const settimane = getSettimaneLunDomEstese(anno, mese)
           const idx = Math.min(Math.max(settimanaChiusure, 0), Math.max(settimane.length - 1, 0))
           const settimana = settimane[idx]
           const giorniLavorativi = settimana ? settimana.giorni.filter(g => !g.domenica) : []
@@ -1432,7 +1545,7 @@ Puoi:
 
                     return (
                       <div key={g.data} className={`rounded-lg border p-3 ${ok ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
-                        <div className="text-sm font-semibold text-gray-800 mb-1">{g.giorno === 'Sab' ? 'Sabato' : ['Lun','Mar','Mer','Gio','Ven'].includes(g.giorno) ? { Lun: 'Lunedì', Mar: 'Martedì', Mer: 'Mercoledì', Gio: 'Giovedì', Ven: 'Venerdì' }[g.giorno] : g.giorno} {g.num} {MESI[mese - 1]}</div>
+                        <div className="text-sm font-semibold text-gray-800 mb-1">{g.giorno === 'Sab' ? 'Sabato' : ['Lun','Mar','Mer','Gio','Ven'].includes(g.giorno) ? { Lun: 'Lunedì', Mar: 'Martedì', Mer: 'Mercoledì', Gio: 'Giovedì', Ven: 'Venerdì' }[g.giorno] : g.giorno} {g.num} {MESI[g.mese - 1]}</div>
                         {ok ? (
                           <div className="text-sm text-green-700">
                             ✅ {chiusuristi.map(({ emp, shift }) => `${emp.nome} ${formatOraShort(shift?.ora_inizio)}/20`).join(' · ')}
@@ -1462,7 +1575,7 @@ Puoi:
 
         {/* Pannello laterale "Mezzogiorno" — copertura fascia 12:00-14:00 per settimana (Lun-Sab) */}
         {showMezzogiorno && (() => {
-          const settimane = getSettimaneLunDom(giorni, mese)
+          const settimane = getSettimaneLunDomEstese(anno, mese)
           const idx = Math.min(Math.max(settimanaMezzogiorno, 0), Math.max(settimane.length - 1, 0))
           const settimana = settimane[idx]
           const giorniLavorativi = settimana ? settimana.giorni.filter(g => !g.domenica) : []
@@ -1496,7 +1609,7 @@ Puoi:
 
                     return (
                       <div key={g.data} className={`rounded-lg border p-3 ${ok ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
-                        <div className="text-sm font-semibold text-gray-800 mb-1">{g.giorno === 'Sab' ? 'Sabato' : ['Lun','Mar','Mer','Gio','Ven'].includes(g.giorno) ? { Lun: 'Lunedì', Mar: 'Martedì', Mer: 'Mercoledì', Gio: 'Giovedì', Ven: 'Venerdì' }[g.giorno] : g.giorno} {g.num} {MESI[mese - 1]}</div>
+                        <div className="text-sm font-semibold text-gray-800 mb-1">{g.giorno === 'Sab' ? 'Sabato' : ['Lun','Mar','Mer','Gio','Ven'].includes(g.giorno) ? { Lun: 'Lunedì', Mar: 'Martedì', Mer: 'Mercoledì', Gio: 'Giovedì', Ven: 'Venerdì' }[g.giorno] : g.giorno} {g.num} {MESI[g.mese - 1]}</div>
                         {presenti.length === 0 ? (
                           <div className="text-sm text-red-700 font-medium">⚠️ Nessuno — manca copertura 12-14!</div>
                         ) : ok ? (
@@ -1747,54 +1860,78 @@ function getOffsetLunedi(anno: number, mese: number): number {
   return primoGiorno === 0 ? 6 : primoGiorno - 1
 }
 
-/** Settimane del mese, raggruppate per confini Lun-Dom quando possibile — gruppi di 7
- * giorni consecutivi che finiscono di Domenica, a partire dal primo Lunedì del mese.
+/** Mese/anno a distanza di `delta` mesi (±1) da (mese, anno) — gestisce il cambio anno. */
+function meseAdiacente(mese: number, anno: number, delta: -1 | 1): { mese: number; anno: number } {
+  if (delta === -1) return mese === 1 ? { mese: 12, anno: anno - 1 } : { mese: mese - 1, anno }
+  return mese === 12 ? { mese: 1, anno: anno + 1 } : { mese: mese + 1, anno }
+}
+
+/** Fino a 6 giorni di "bordo" di un mese — la 'coda' (ultimi giorni, per estendere il
+ * mese SUCCESSIVO all'indietro) o la 'testa' (primi giorni, per estendere il mese
+ * PRECEDENTE in avanti). 6 giorni bastano sempre a coprire l'eventuale settimana a
+ * cavallo, qualunque sia il giorno della settimana in cui cade il confine tra i mesi. */
+function giorniBordo(anno: number, mese: number, parte: 'coda' | 'testa'): { inizio: string; fine: string } {
+  const giorni = getDays(anno, mese)
+  const slice = parte === 'coda' ? giorni.slice(-6) : giorni.slice(0, 6)
+  return { inizio: slice[0].data, fine: slice[slice.length - 1].data }
+}
+
+/** Calendario esteso attorno al mese (mese, anno): i suoi giorni + fino a 6 giorni finali
+ * del mese precedente + fino a 6 giorni iniziali del successivo — ogni giorno porta il
+ * proprio {mese, anno} reale, perché una settimana costruita su questo calendario può
+ * contenere giorni di schedule_id diversi. */
+function getGiorniEstesi(anno: number, mese: number) {
+  const prev = meseAdiacente(mese, anno, -1)
+  const next = meseAdiacente(mese, anno, 1)
+  const correnti = getDays(anno, mese).map(g => ({ ...g, mese, anno }))
+  const prevTail = getDays(prev.anno, prev.mese).slice(-6).map(g => ({ ...g, mese: prev.mese, anno: prev.anno }))
+  const nextHead = getDays(next.anno, next.mese).slice(0, 6).map(g => ({ ...g, mese: next.mese, anno: next.anno }))
+  return [...prevTail, ...correnti, ...nextHead]
+}
+
+/** Settimane Lun-Dom VERE del mese, comprese quelle a cavallo con il mese precedente/
+ * successivo — 25/08/2026, correzione del fix del 22/08/2026 (vedi CLAUDE.md, sezione
+ * "prima settimana di Settembre").
  *
- * 🐛 22/08/2026 (bug segnalato — "prima settimana di Settembre non gestibile"): prima
- * di questo fix, `start` saltava direttamente al primo lunedì TROVATO DENTRO IL MESE,
- * scartando silenziosamente ogni giorno prima di quel lunedì — per un mese come
- * settembre 2026 (1° = martedì), i giorni 1-6 settembre (l'intera settimana reale
- * Lun31Ago-Dom6Set, tolto il 31 agosto che appartiene ad agosto) non comparivano in
- * NESSUNA voce del selettore "Sett. N": non selezionabili, non generabili via "Genera
- * settimana", nessun pannello Chiusure/Mezzogiorno per quei giorni. Il frammento
- * finale del mese (es. "Lun 31" da solo, ad agosto) veniva invece già incluso — stesso
- * trattamento ora esteso al frammento iniziale, invece di scartarlo. Non risolve la
- * sovrapposizione REALE tra mesi (una settimana non attraversa mai due schedule_id,
- * anche dopo questo fix — Ago31 resta un frammento di 1 giorno nel selettore di
- * agosto, Sett1-6 un frammento di 6 giorni in quello di settembre, non un'unica
- * settimana Lun-Dom unificata) — soluzione scelta deliberatamente più semplice e a
- * basso rischio (nessuna scrittura cross-schedule) rispetto a unificarle, perché
- * risolve il sintomo bloccante reale (i giorni erano INVISIBILI, non "raggruppati in
- * modo diverso da quanto ci si aspetterebbe") senza toccare generaSettimana/
- * resetSettimana (che già gestiscono correttamente i chunk parziali, verificato). */
-function getSettimaneLunDom(giorni: ReturnType<typeof getDays>, mese: number): { label: string; giorni: ReturnType<typeof getDays> }[] {
-  const firstMondayIdx = giorni.findIndex(g => new Date(g.data + 'T00:00:00').getDay() === 1)
+ * Il fix del 22/08 si limitava a includere il frammento iniziale/finale come voce
+ * SEPARATA, sempre dentro un solo mese/schedule_id (es. "Lun31 Agosto" da 1 solo giorno
+ * nel selettore di Agosto, "Mar1-Dom6 Settembre" da 6 giorni nel selettore di Settembre)
+ * — Giacomo ha segnalato che questo lascia il 31 agosto come giorno "fantasma", non
+ * gestibile insieme al resto della settimana di lavoro di Settembre.
+ *
+ * Questa versione costruisce le settimane su un calendario ESTESO (getGiorniEstesi:
+ * fino a 6 giorni del mese prima + fino a 6 del mese dopo), così una settimana come
+ * Lun31Ago—Dom6Set appare come UNA SOLA voce di 7 giorni reali. Ogni giorno porta il
+ * proprio {mese, anno} — spetta ai chiamanti (generaSettimana, resetSettimana, pannelli,
+ * Maia) risolvere il relativo schedule_id per giorno (scheduleIdFor nel componente),
+ * dato che una stessa settimana può avere giorni di due schedule_id diversi.
+ *
+ * Le settimane che non toccano il mese richiesto vengono scartate (evita che il
+ * selettore di Settembre mostri anche una settimana che sta interamente in Agosto, già
+ * visibile nel selettore di Agosto) — ma una settimana a cavallo COMPARE in entrambi i
+ * selettori (Agosto e Settembre), perché tocca davvero entrambi i mesi: è previsto e
+ * corretto (il 31 agosto resta comunque visibile/modificabile anche dalla vista mensile
+ * di Agosto, oltre che da questa settimana a cavallo). */
+function getSettimaneLunDomEstese(anno: number, mese: number) {
+  const estesi = getGiorniEstesi(anno, mese)
+  const firstMondayIdx = estesi.findIndex(g => new Date(g.data + 'T00:00:00').getDay() === 1)
   const start = firstMondayIdx === -1 ? 0 : firstMondayIdx
+  const chunks: (typeof estesi)[] = []
+  if (start > 0) chunks.push(estesi.slice(0, start))
+  for (let i = start; i < estesi.length; i += 7) {
+    const chunk = estesi.slice(i, i + 7)
+    if (chunk.length > 0) chunks.push(chunk)
+  }
   const nomeMese = MESI[mese - 1]
-  const settimane: { label: string; giorni: ReturnType<typeof getDays> }[] = []
-
-  // Frammento iniziale (giorni prima del primo Lunedì del mese, es. Sett1-6 2026): prima
-  // veniva scartato silenziosamente — ora incluso come voce a sé, stesso trattamento già
-  // riservato al frammento finale di mese incompleto (vedi commento sopra la funzione).
-  if (start > 0) {
-    const chunk = giorni.slice(0, start)
-    const primo = chunk[0]
-    const ultimo = chunk[chunk.length - 1]
-    settimane.push({
-      label: `${primo.giorno} ${primo.num} — ${ultimo.giorno} ${ultimo.num} ${nomeMese}`,
-      giorni: chunk,
+  return chunks
+    .filter(chunk => chunk.some(g => g.mese === mese && g.anno === anno))
+    .map(chunk => {
+      const primo = chunk[0]
+      const ultimo = chunk[chunk.length - 1]
+      const labelMese = primo.mese !== ultimo.mese ? `${MESI[primo.mese - 1]} — ${MESI[ultimo.mese - 1]}` : nomeMese
+      return {
+        label: `${primo.giorno} ${primo.num} — ${ultimo.giorno} ${ultimo.num} ${labelMese}`,
+        giorni: chunk,
+      }
     })
-  }
-
-  for (let i = start; i < giorni.length; i += 7) {
-    const chunk = giorni.slice(i, i + 7)
-    if (chunk.length === 0) continue
-    const primo = chunk[0]
-    const ultimo = chunk[chunk.length - 1]
-    settimane.push({
-      label: `${primo.giorno} ${primo.num} — ${ultimo.giorno} ${ultimo.num} ${nomeMese}`,
-      giorni: chunk,
-    })
-  }
-  return settimane
 }

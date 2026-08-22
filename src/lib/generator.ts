@@ -746,31 +746,58 @@ function verificaBudgetSettimanale(shifts: Omit<Shift, 'id' | 'created_at'>[], e
 }
 
 interface GenerateWeekParams {
-  scheduleId: string
+  // Settimane a cavallo (25/08/2026): ogni giorno Lun-Sab della settimana porta il proprio
+  // schedule_id — normalmente tutti uguali (settimana interamente in un mese), ma per una
+  // settimana a cavallo tra due mesi (es. Lun31Ago-Sab5Set) i giorni di agosto e quelli di
+  // settembre hanno schedule_id diversi. Sostituisce il precedente {scheduleId, weekStart,
+  // weekEnd} — vedi commento sotto per come vengono raggruppati.
+  giorni: { data: string; scheduleId: string }[]
   employees: Employee[]
   unavailabilities: Unavailability[]
   domenicaShifts: { employee_id: string; tipo: string }[] // turni domenicali già assegnati quella settimana
-  weekStart: string // Lun YYYY-MM-DD
-  weekEnd: string   // Sab YYYY-MM-DD
 }
 
-/** Genera i turni Lun-Sab di UNA settimana, rispettando le domeniche già assegnate.
+/** Genera i turni Lun-Sab di UNA settimana, rispettando le domeniche già assegnate —
+ * eventualmente a cavallo tra due mesi/schedule_id diversi (25/08/2026).
+ *
  * Riusa generateShiftsMD (stessa identica logica del mese intero — nessuna duplicazione
- * delle regole per Romeo/cassiere22/Yuri/ecc.), filtra al range richiesto, poi applica
- * un pass di bilanciamento automatico per chi ha già lavorato domenica quella settimana:
- * stesse regole del bilanciamento interattivo di Maia (Romeo solo Lun/Mer/Ven, altri mai
- * Sab/Dom, mai sotto il minimo contrattuale) ma applicato subito, senza conferma. */
+ * delle regole per Romeo/cassiere22/Yuri/ecc.): raggruppa i giorni della settimana per
+ * schedule_id (di norma un solo gruppo, fino a 2 per una settimana a cavallo), chiama
+ * generateShiftsMD UNA VOLTA per ciascun gruppo con il proprio mese/anno/scheduleId,
+ * filtra ciascun risultato alle sole date di quel gruppo, poi concatena. Il pass di
+ * bilanciamento eccesso-ore sotto opera sull'array concatenato — è già agnostico rispetto
+ * a schedule_id (lavora per employee_id/data), quindi non richiede modifiche: ogni riga
+ * porta comunque il proprio schedule_id corretto, stampato dal gruppo che l'ha generata. */
 export async function generateShiftsMDWeek(params: GenerateWeekParams): Promise<Omit<Shift, 'id' | 'created_at'>[]> {
-  const { scheduleId, employees, unavailabilities, domenicaShifts, weekStart, weekEnd } = params
+  const { giorni, employees, unavailabilities, domenicaShifts } = params
+  if (giorni.length === 0) return []
 
-  const startDate = new Date(weekStart + 'T00:00:00')
-  const mese = startDate.getMonth() + 1
-  const anno = startDate.getFullYear()
+  // Raggruppa i giorni per schedule_id, preservando l'ordine di apparizione — per una
+  // settimana normale (1 solo mese) produce un unico gruppo, identico al comportamento
+  // precedente.
+  const gruppi = new Map<string, string[]>()
+  for (const g of giorni) {
+    const arr = gruppi.get(g.scheduleId) ?? []
+    arr.push(g.data)
+    gruppi.set(g.scheduleId, arr)
+  }
 
-  const shiftsMese = await generateShiftsMD({
-    scheduleId, employees, unavailabilities, mese, anno,
-  })
-  const shiftsSettimana = shiftsMese.filter(s => s.data >= weekStart && s.data <= weekEnd)
+  const shiftsSettimana: Omit<Shift, 'id' | 'created_at'>[] = []
+  for (const [scheduleId, date] of Array.from(gruppi)) {
+    const inizioGruppo = date[0]
+    const fineGruppo = date[date.length - 1]
+    const primaData = new Date(inizioGruppo + 'T00:00:00')
+    const mese = primaData.getMonth() + 1
+    const anno = primaData.getFullYear()
+
+    const shiftsMese = await generateShiftsMD({
+      scheduleId, employees, unavailabilities, mese, anno,
+    })
+    shiftsSettimana.push(...shiftsMese.filter(s => s.data >= inizioGruppo && s.data <= fineGruppo))
+  }
+  // Ripristina l'ordine cronologico (i gruppi sopra possono uscire in ordine mese-dopo-mese
+  // se la Map li ha visti così, ma la settimana deve restare Lun→Sab per la logica sotto).
+  shiftsSettimana.sort((a, b) => a.data.localeCompare(b.data))
 
   const domenicaMap: Record<string, number> = {}
   for (const ds of domenicaShifts) {

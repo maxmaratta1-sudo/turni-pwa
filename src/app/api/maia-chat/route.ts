@@ -166,6 +166,63 @@ interface ToolCtx {
   scheduleId: string
 }
 
+// ── Settimane a cavallo tra due mesi (25/08/2026) ──────────────────────────────
+// Prima di questo fix, ogni tool che scrive/legge turni su una o più date usava sempre
+// ctx.scheduleId (lo schedule del mese aperto nel manager quando la conversazione è
+// iniziata) per QUALSIASI data, anche quando quella data appartiene a un mese diverso
+// (es. update_shift_week chiamato su un range Lun31Ago-Sab5Set: il 31 agosto veniva
+// scritto sotto lo schedule_id di Settembre — sbagliato). Questi helper risolvono lo
+// schedule_id dalla data stessa, non da un valore fisso passato all'inizio.
+
+/** Get-or-create dello schedule per il mese/anno di `data` — usato per le SCRITTURE
+ * (upsert/delete di shifts/unavailabilities), che devono sempre poter procedere anche se
+ * il mese di quella data non ha ancora uno schedule creato (stessa logica di
+ * ensureSchedule in manager/page.tsx, duplicata qui perché questo file gira server-side
+ * senza accesso allo state del client). */
+async function ensureScheduleIdForData(storeId: string, data: string): Promise<string> {
+  const d = new Date(data + 'T00:00:00')
+  const mese = d.getMonth() + 1
+  const anno = d.getFullYear()
+  const { data: existing } = await supabaseAdmin
+    .from('schedules').select('id').eq('store_id', storeId).eq('mese', mese).eq('anno', anno).maybeSingle()
+  if (existing) return existing.id
+  const { data: created, error } = await supabaseAdmin
+    .from('schedules').insert({ store_id: storeId, mese, anno, stato: 'bozza' }).select('id').single()
+  if (error || !created) throw new Error(`Impossibile creare lo schedule per ${mese}/${anno}: ${error?.message ?? 'errore sconosciuto'}`)
+  return created.id
+}
+
+/** Turni di un dipendente su un range di date che può attraversare fino a 2 mesi/schedule
+ * diversi — usato per le LETTURE (verificaBudgetSettimanale, trovaBilanciamentoDomenica),
+ * che a differenza delle scritture non devono creare schedule mancanti: se un mese non ha
+ * ancora uno schedule, semplicemente non ha turni da contare. Raggruppa le date per mese,
+ * interroga ogni schedule esistente separatamente, poi unisce i risultati — un singolo
+ * `.eq('schedule_id', X)` fisso mancherebbe sempre i turni dell'altro mese per una
+ * settimana a cavallo. */
+async function shiftsNelRange(storeId: string, employeeId: string, start: string, end: string) {
+  const dates = eachDate(start, end)
+  const mesiCoinvolti = Array.from(new Set(dates.map(d => {
+    const dt = new Date(d + 'T00:00:00')
+    return `${dt.getFullYear()}-${dt.getMonth() + 1}`
+  })))
+  const risultati: { data: string; tipo: string; ora_inizio?: string | null; ora_fine?: string | null }[] = []
+  for (const chiave of mesiCoinvolti) {
+    const [anno, mese] = chiave.split('-').map(Number)
+    const { data: sched } = await supabaseAdmin
+      .from('schedules').select('id').eq('store_id', storeId).eq('mese', mese).eq('anno', anno).maybeSingle()
+    if (!sched) continue // nessuno schedule per questo mese = nessun turno da contare
+    const dateDelMese = dates.filter(d => {
+      const dt = new Date(d + 'T00:00:00')
+      return dt.getFullYear() === anno && dt.getMonth() + 1 === mese
+    })
+    const { data: sh } = await supabaseAdmin
+      .from('shifts').select('data, tipo, ora_inizio, ora_fine')
+      .eq('employee_id', employeeId).eq('schedule_id', sched.id).in('data', dateDelMese)
+    risultati.push(...(sh || []))
+  }
+  return risultati
+}
+
 async function findEmployee(nome: string, storeId: string) {
   const { data, error } = await supabaseAdmin
     .from('employees')
@@ -252,9 +309,15 @@ const isDomenicaTipo = (tipo: string) => tipo === 'domenica_lungo' || tipo === '
  * override veniva usato solo per calcolare il totale con più precisione, non per saltare
  * il controllo) — il tool restituiva un errore, ma a volte Maia rispondeva "fatto" lo
  * stesso senza riportarlo fedelmente a Giacomo (vedi anche nota IMPORTANTE nel system
- * prompt). Ritorna un messaggio d'errore se sfora E non è emergenza, altrimenti null. */
+ * prompt). Ritorna un messaggio d'errore se sfora E non è emergenza, altrimenti null.
+ *
+ * 25/08/2026 (settimane a cavallo): prendeva `scheduleId` fisso e leggeva Lun-Dom con un
+ * solo `.eq('schedule_id', ...)` — per una settimana a cavallo tra due mesi (es.
+ * Lun31Ago-Dom6Set) i turni del mese "sbagliato" (quello diverso da quello di `data`)
+ * risultavano invisibili, sottostimando le ore già assegnate. Ora prende `storeId` e usa
+ * shiftsNelRange, che interroga ogni schedule coinvolto separatamente. */
 async function verificaBudgetSettimanale(
-  scheduleId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string, oreOverride?: number, isEmergenza?: boolean
+  storeId: string, employeeId: string, data: string, tipo: string, oreSettimanali: number, nome: string, oreOverride?: number, isEmergenza?: boolean
 ): Promise<string | null> {
   if (isDomenicaTipo(tipo)) return null // domenica non conta mai nel budget, mai bloccata
   if (tipo === 'riposo') return null // il riposo riduce sempre le ore, non può mai sforare
@@ -264,13 +327,7 @@ async function verificaBudgetSettimanale(
   const sunday = new Date(monday)
   sunday.setDate(sunday.getDate() + 6)
 
-  const { data: weekShifts } = await supabaseAdmin
-    .from('shifts')
-    .select('data, tipo, ora_inizio, ora_fine')
-    .eq('employee_id', employeeId)
-    .eq('schedule_id', scheduleId)
-    .gte('data', toDateStr(monday))
-    .lte('data', toDateStr(sunday))
+  const weekShifts = await shiftsNelRange(storeId, employeeId, toDateStr(monday), toDateStr(sunday))
 
   const isFeriale = (d: string) => new Date(d + 'T00:00:00').getDay() !== 0 // 0 = domenica
 
@@ -317,9 +374,13 @@ function minGiornoPerContratto(oreSettimanali: number): number {
  * sforare le 28h contrattuali. Romeo recupera solo su Lun/Mer/Ven perché sono i suoi
  * giorni da 5h (bilanciano esattamente le ore domenicali) — non è più legato allo scarico
  * merce, è puro bilanciamento ore. Ritorna solo una PROPOSTA testuale — l'applicazione
- * avviene dopo conferma esplicita di Giacomo. */
+ * avviene dopo conferma esplicita di Giacomo.
+ *
+ * 25/08/2026 (settimane a cavallo): stesso fix di verificaBudgetSettimanale — `scheduleId`
+ * fisso sostituito da `storeId` + shiftsNelRange, per non perdere i turni feriali della
+ * settimana quando cadono nel mese "sbagliato". */
 async function trovaBilanciamentoDomenica(
-  scheduleId: string,
+  storeId: string,
   emp: { id: string; nome: string; ore_settimanali: number },
   domenicaData: string,
   oreDomenica: number
@@ -328,13 +389,7 @@ async function trovaBilanciamentoDomenica(
   const saturday = new Date(monday)
   saturday.setDate(saturday.getDate() + 5)
 
-  const { data: weekShifts } = await supabaseAdmin
-    .from('shifts')
-    .select('data, tipo, ora_inizio, ora_fine')
-    .eq('employee_id', emp.id)
-    .eq('schedule_id', scheduleId)
-    .gte('data', toDateStr(monday))
-    .lte('data', toDateStr(saturday))
+  const weekShifts = await shiftsNelRange(storeId, emp.id, toDateStr(monday), toDateStr(saturday))
 
   const oreFeriali = (weekShifts || []).reduce((sum, s) => sum + getOreReali(s), 0)
   const eccesso = (oreFeriali + oreDomenica) - emp.ore_settimanali
@@ -484,15 +539,25 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
     const blocco = assertNonDomenicaPerEsclusi(emp, input.tipo)
     if (blocco) return blocco
+    // Settimane a cavallo (25/08/2026): schedule_id risolto dalla DATA del turno, non da
+    // ctx.scheduleId (fisso sul mese aperto quando la conversazione è iniziata) — così un
+    // turno sul 31 agosto scrive correttamente sotto lo schedule di Agosto anche se la
+    // conversazione/settimana attiva è su Settembre. Crea lo schedule del mese se manca.
+    let scheduleId: string
+    try {
+      scheduleId = await ensureScheduleIdForData(ctx.storeId, input.data)
+    } catch (e: any) {
+      return `Errore: ${e?.message ?? String(e)}`
+    }
     const oreOverride: number | undefined = typeof input.ore === 'number' ? input.ore : undefined
     // FIX 1 (7 agosto 2026): "ore" esplicito in update_shift arriva SEMPRE da un comando
     // preciso di Giacomo (mai calcolato automaticamente qui, a differenza di
     // update_shift_week) — quindi la sua sola presenza è già la firma di un'emergenza
     // autorizzata, vedi verificaBudgetSettimanale.
     const isEmergenza = oreOverride !== undefined
-    const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, input.data, input.tipo, emp.ore_settimanali, emp.nome, oreOverride, isEmergenza)
+    const erroreOre = await verificaBudgetSettimanale(ctx.storeId, emp.id, input.data, input.tipo, emp.ore_settimanali, emp.nome, oreOverride, isEmergenza)
     if (erroreOre) return erroreOre
-    const { error } = await upsertShift(ctx.scheduleId, emp.id, input.data, input.tipo, oreOverride)
+    const { error } = await upsertShift(scheduleId, emp.id, input.data, input.tipo, oreOverride)
     if (error) {
       // FIX 1 STEP 3: logging esplicito lato server per ogni fallimento di salvataggio —
       // prima passava inosservato, visibile solo se qualcuno controllava manualmente i log.
@@ -502,17 +567,17 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     if (isDomenicaTipo(input.tipo)) {
       const oreDomenica = input.tipo === 'domenica_lungo' ? 5 : 3
       if (emp.ore_settimanali === 28 || emp.ore_settimanali === 22) {
-        const proposta = await trovaBilanciamentoDomenica(ctx.scheduleId, emp, input.data, oreDomenica)
+        const proposta = await trovaBilanciamentoDomenica(ctx.storeId, emp, input.data, oreDomenica)
         return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). ${proposta}`
       }
       return `OK: turno domenicale assegnato a ${emp.nome} il ${input.data} ("${input.tipo}", ${oreDomenica}h). IMPORTANTE: ora DEVI chiedere a Giacomo in quale giorno della settimana PRECEDENTE (MAI sabato, MAI domenica${emp.nome === 'Romeo' ? ', MAI Lun/Mer/Ven per Romeo' : ''}) vuole che ${emp.nome} recuperi le ${oreDomenica} ore lavorate domenica — non concludere il flusso senza aver fatto questa domanda.`
     }
     if (input.tipo === 'riposo' && input.recupero_domenicale) {
       await supabaseAdmin.from('unavailabilities').delete()
-        .eq('employee_id', emp.id).eq('schedule_id', ctx.scheduleId).eq('data', input.data)
+        .eq('employee_id', emp.id).eq('schedule_id', scheduleId).eq('data', input.data)
       const { error: errRecupero } = await supabaseAdmin.from('unavailabilities').insert({
         employee_id: emp.id,
-        schedule_id: ctx.scheduleId,
+        schedule_id: scheduleId,
         data: input.data,
         tipo_assenza: 'R',
         motivo: 'Recupero domenicale',
@@ -552,9 +617,20 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
       if (oreOverride === undefined && isCristinaStefania && (input.tipo === 'mattina' || input.tipo === 'pomeriggio')) {
         oreOverride = dayOfWeek === 6 ? 6 : ORE_28H_FERIALI[dayOfWeek]
       }
-      const erroreOre = await verificaBudgetSettimanale(ctx.scheduleId, emp.id, d, input.tipo, emp.ore_settimanali, emp.nome, oreOverride, isEmergenza)
+      const erroreOre = await verificaBudgetSettimanale(ctx.storeId, emp.id, d, input.tipo, emp.ore_settimanali, emp.nome, oreOverride, isEmergenza)
       if (erroreOre) { bloccatiPerOre++; continue }
-      const { error } = await upsertShift(ctx.scheduleId, emp.id, d, input.tipo, oreOverride)
+      // Settimane a cavallo (25/08/2026): schedule_id risolto per QUESTO giorno `d` del
+      // range, non un ctx.scheduleId fisso riusato per tutti i giorni — prima un range
+      // Lun31Ago-Sab5Set scriveva ANCHE il 31 agosto sotto lo schedule di Settembre.
+      let scheduleId: string
+      try {
+        scheduleId = await ensureScheduleIdForData(ctx.storeId, d)
+      } catch (e: any) {
+        falliti++
+        console.error(`[maia-chat] update_shift_week FALLITO (schedule per ${d}) — ${emp.nome}:`, e)
+        continue
+      }
+      const { error } = await upsertShift(scheduleId, emp.id, d, input.tipo, oreOverride)
       if (!error) {
         modificati++
       } else {
@@ -619,10 +695,22 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     let deltaPermessiOre = 0
 
     for (const d of dates) {
+      // Settimane a cavallo (25/08/2026): schedule_id risolto per QUESTO giorno `d`, non
+      // ctx.scheduleId fisso — un array di date può attraversare due mesi (stesso bug
+      // shape già trovato e corretto in bridge/route.ts set_assenza, qui via architettura
+      // condivisa invece di un secondo intervento separato).
+      let scheduleId: string
+      try {
+        scheduleId = await ensureScheduleIdForData(ctx.storeId, d)
+      } catch (e: any) {
+        console.error(`[maia-chat] set_assenza FALLITO (schedule per ${d}) — ${emp.nome}:`, e)
+        continue
+      }
+
       const { data: existingShift } = await supabaseAdmin
         .from('shifts')
         .select('ora_inizio, ora_fine')
-        .eq('schedule_id', ctx.scheduleId)
+        .eq('schedule_id', scheduleId)
         .eq('employee_id', emp.id)
         .eq('data', d)
         .maybeSingle()
@@ -635,10 +723,10 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
       if (tipoAssenza === 'F') deltaFerieGiorni += 1
 
       await supabaseAdmin.from('unavailabilities').delete()
-        .eq('employee_id', emp.id).eq('schedule_id', ctx.scheduleId).eq('data', d)
+        .eq('employee_id', emp.id).eq('schedule_id', scheduleId).eq('data', d)
       await supabaseAdmin.from('unavailabilities').insert({
         employee_id: emp.id,
-        schedule_id: ctx.scheduleId,
+        schedule_id: scheduleId,
         data: d,
         tipo_assenza: tipoAssenza,
         motivo: input.motivo || null,
@@ -652,7 +740,7 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
       // (sequenza 2) prima di applicare l'assenza, altrimenti resterebbe una riga
       // orfana incoerente.
       await supabaseAdmin.from('shifts').delete()
-        .eq('schedule_id', ctx.scheduleId).eq('employee_id', emp.id).eq('data', d).gt('sequenza', 1)
+        .eq('schedule_id', scheduleId).eq('employee_id', emp.id).eq('data', d).gt('sequenza', 1)
 
       if (turnoRidotto) {
         // Permesso a ore valido su un turno esistente: accorcia invece di azzerare.
@@ -661,10 +749,10 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
         // che lo omette fallisce silenziosamente se mai tentasse un vero insert.
         await supabaseAdmin.from('shifts')
           .update({ ora_inizio: turnoRidotto.ora_inizio, ora_fine: turnoRidotto.ora_fine })
-          .eq('schedule_id', ctx.scheduleId).eq('employee_id', emp.id).eq('data', d)
+          .eq('schedule_id', scheduleId).eq('employee_id', emp.id).eq('data', d)
       } else {
         await supabaseAdmin.from('shifts').upsert(
-          { schedule_id: ctx.scheduleId, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null, sequenza: 1 },
+          { schedule_id: scheduleId, employee_id: emp.id, data: d, tipo: 'riposo', ora_inizio: null, ora_fine: null, sequenza: 1 },
           { onConflict: 'schedule_id,employee_id,data,sequenza' }
         )
       }
@@ -752,6 +840,18 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
       return `Errore: non riesco a calcolare un turno standard per ${emp.nome} il ${vecchioGiorno} (dipendente non presente in turni_config, o giorno non gestito) — verifica manualmente e usa update_shift per impostarlo a mano.`
     }
 
+    // Settimane a cavallo (25/08/2026): vecchioGiorno e nuovoGiorno risolvono lo
+    // schedule_id CIASCUNO per la propria data — normalmente coincidono (uno scambio di
+    // riposo è quasi sempre nella stessa settimana/mese), ma non è garantito, quindi non
+    // si riusa più un ctx.scheduleId fisso per entrambi.
+    let scheduleIdVecchio: string, scheduleIdNuovo: string
+    try {
+      scheduleIdVecchio = await ensureScheduleIdForData(ctx.storeId, vecchioGiorno)
+      scheduleIdNuovo = await ensureScheduleIdForData(ctx.storeId, nuovoGiorno)
+    } catch (e: any) {
+      return `Errore: ${e?.message ?? String(e)}`
+    }
+
     // Ripristina un turno di lavoro nel vecchio giorno — orario ESATTO calcolato
     // da calcolaTurnoStandardGiorno (non passa da upsertShift/ORARI_TURNO_MD:
     // quel lookup è fisso per tipo e sbaglierebbe per i dipendenti a ore
@@ -759,10 +859,10 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     // gestisce correttamente). Stessa pulizia difensiva del turno spezzato di
     // upsertShift (righe orfane sequenza>1).
     await supabaseAdmin.from('shifts').delete()
-      .eq('schedule_id', ctx.scheduleId).eq('employee_id', emp.id).eq('data', vecchioGiorno).gt('sequenza', 1)
+      .eq('schedule_id', scheduleIdVecchio).eq('employee_id', emp.id).eq('data', vecchioGiorno).gt('sequenza', 1)
     const { error: errRipristino } = await supabaseAdmin.from('shifts').upsert(
       {
-        schedule_id: ctx.scheduleId,
+        schedule_id: scheduleIdVecchio,
         employee_id: emp.id,
         data: vecchioGiorno,
         tipo: standard.tipo,
@@ -780,7 +880,7 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     // Metti a riposo il nuovo giorno — riuso upsertShift normale, stesso
     // trattamento di qualunque altro riposo (nessun recupero domenicale qui,
     // questo tool è esplicitamente per il riposo infrasettimanale normale).
-    const { error: errNuovoRiposo } = await upsertShift(ctx.scheduleId, emp.id, nuovoGiorno, 'riposo')
+    const { error: errNuovoRiposo } = await upsertShift(scheduleIdNuovo, emp.id, nuovoGiorno, 'riposo')
     if (errNuovoRiposo) {
       console.error(`[maia-chat] sposta_riposo FALLITO (nuovo riposo ${nuovoGiorno}) — ${emp.nome}:`, errNuovoRiposo)
       return `Turno ripristinato il ${vecchioGiorno}, ma errore nell'impostare il riposo il ${nuovoGiorno}: ${errNuovoRiposo.message}. Verifica manualmente.`

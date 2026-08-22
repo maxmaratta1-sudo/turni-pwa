@@ -754,3 +754,86 @@ Trace numerico rieseguito con la funzione corretta, Agosto e Settembre 2026:
   credenziale manager in questa sessione): consigliato che Giacomo apra Settembre 2026
   e confermi che "Mar1 — Dom6 Settembre" compaia ora nel selettore e sia utilizzabile
   (genera/reset/Chiusure/Mezzogiorno/Maia).
+
+## Correzione — settimane VERE a cavallo tra due mesi/schedule (25/08/2026)
+
+**Il fix del 22/08 sopra risolveva il problema sbagliato.** Giacomo ha segnalato che il
+31 agosto restava un giorno "fantasma" isolato (1 solo giorno in una settimana a sé
+nel selettore di Agosto), non gestibile insieme al resto della settimana di lavoro di
+Settembre (1-6). Serviva l'opzione che il fix del 22/08 aveva scartato per rischio:
+settimane Lun-Dom VERE che possono attraversare due `schedule_id` diversi.
+
+### Piano concordato con Max prima di scrivere codice
+
+1. **Auto-provisioning schedule mancante** — `ensureSchedule(mese, anno)` get-or-create
+   (manager/page.tsx) e `ensureScheduleIdForData(storeId, data)` lato server
+   (maia-chat/route.ts) — creano automaticamente lo schedule di un mese se manca, invece
+   di richiedere il click manuale su "Crea piano mese" per il mese adiacente.
+2. **Settimane cross-mese (frontend)** — `getSettimaneLunDomEstese` sostituisce
+   `getSettimaneLunDom` (22/08): costruisce le settimane su un calendario ESTESO (fino a
+   6 giorni del mese prima + 6 del mese dopo, `getGiorniEstesi`), così Lun31Ago-Dom6Set
+   appare come UNA voce di 7 giorni reali, ognuno con `{mese, anno, scheduleId}` propri
+   (`scheduleIdFor` risolve lo schedule_id per giorno da `schedule`/`schedulePrev`/
+   `scheduleNext`, i 3 schedule letti in `loadData()`). Le settimane che non toccano il
+   mese richiesto sono scartate, ma una settimana a cavallo compare in ENTRAMBI i
+   selettori (Agosto e Settembre) — previsto e corretto: il 31 agosto resta comunque
+   visibile/modificabile anche dalla vista mensile di Agosto.
+3. **`generate-week` (API) + `generateShiftsMDWeek` (generator.ts)** — il body passa da
+   `{schedule_id, week_start, week_end}` scalare a `{giorni: [{data, schedule_id}]}`.
+   `generateShiftsMDWeek` raggruppa i giorni per schedule_id, chiama `generateShiftsMD`
+   una volta per gruppo con il proprio mese/anno, concatena e riordina cronologicamente.
+   Ogni query della route (domenica, unavailabilities, turni esistenti) ora itera su
+   TUTTI gli schedule_id coinvolti (fino a 2), non più uno fisso. Stesso fix su
+   `resolveOpusShifts` (generateWithOpus.ts): da `scheduleId` fisso a un resolver
+   `scheduleIdForData(data)` per riga.
+4. **`resetSettimana()`** — raggruppa `settimanaAttiva.giorni` per `scheduleId` distinto
+   ed esegue il delete (shifts+unavailabilities) una volta per ciascun gruppo, sul
+   proprio range di date reali.
+5. **Pannelli Chiusure/Mezzogiorno** — `getShift`/`hasUnavailability`/`getAssenzaCode`/
+   `oreLavorateGiorno` ora cercano anche in `shiftsBordo`/`unavailabilitiesBordo` (caricati
+   in `loadData()` per i soli giorni di bordo, non l'intero mese adiacente) — i pannelli
+   vedono l'intera settimana reale, non solo il mese aperto. Anche l'etichetta giorno
+   (`{g.num} {MESI[mese-1]}` → `{MESI[g.mese-1]}`) e quella di `lavoraSuSettimana` erano
+   fisse sul mese aperto: corrette per usare il mese reale del giorno (altrimenti il 31
+   agosto sarebbe stato etichettato "31 Settembre").
+6. **Maia (`maia-chat/route.ts`)** — era il pezzo a più rischio (20+ call site su
+   `ctx.scheduleId` fisso per l'intera conversazione). Aggiunti `ensureScheduleIdForData`
+   (scritture, get-or-create) e `shiftsNelRange` (letture multi-schedule, senza creare
+   nulla). Aggiornati: `update_shift` (schedule risolto dalla data del turno),
+   `update_shift_week` (risolto per OGNI giorno del loop, non più un fisso riusato — era
+   un bug reale anche prima di questa richiesta), `set_assenza` (stesso fix, per ogni
+   data dell'array), `sposta_riposo` (vecchio/nuovo giorno risolti separatamente),
+   `verificaBudgetSettimanale`/`trovaBilanciamentoDomenica` (da `scheduleId` fisso a
+   `storeId`+`shiftsNelRange`, altrimenti il controllo ore settimanali sottostimava le
+   ore già assegnate per una settimana a cavallo). `get_employee_shifts` lasciato
+   invariato (intenzionalmente mese-scoped, "turni del mese corrente").
+
+**Effetto collaterale accettato esplicitamente da Max**: il 31 agosto è ora gestibile
+sia dalla vista mensile di Agosto sia dalla settimana a cavallo di Settembre — stesso
+giorno, stesso `schedule_id`, due punti di accesso. Non un bug.
+
+**Bug collaterali preesistenti risolti come effetto del fix architetturale** (nessun
+intervento separato, come concordato con Max): `update_shift_week` in maia-chat/route.ts
+riusava un solo `scheduleId` per l'intero range — corretto qui. `bridge/route.ts`
+(`set_assenza` via WhatsApp) ha lo stesso pattern ma è un file separato, non toccato in
+questo giro — resta un bug noto isolato, da correggere separatamente se necessario.
+
+### Test con dati reali (Vercel preview + route di debug temporanea, rimossa a fine test)
+
+1. **Genera settimana** (`/api/shifts/generate-week`) sulla settimana reale Lun31Ago-Sab5Set
+   2026 per l'intero negozio MD Lanciano: 64 turni generati, **13 correttamente sotto lo
+   schedule_id di Agosto** (31/08), **65 correttamente sotto quello di Settembre** (01-05/09,
+   incluso 1 turno di test), **zero** finiti sotto lo schedule_id sbagliato in entrambe le
+   direzioni.
+2. **Maia, stessa conversazione**: chiesto (via chiamata reale a `/api/maia-chat`, stessa
+   settimana attiva Lun31Ago-Dom6Set) di assegnare un turno mattina ad Angelica il
+   31/08 e un turno pomeriggio il 01/09 — Maia ha eseguito entrambi (`update_shift` ×2) e
+   confermato: "Lunedì 31/08 → mattina, Martedì 01/09 → pomeriggio". Verificato su
+   Supabase: 31/08 → `schedule_id` di Agosto ✅, 01/09 → `schedule_id` di Settembre ✅.
+3. **Pulizia**: tutti i dati di test rimossi subito dopo la verifica (66 righe cancellate
+   per `created_at` recente, filtro che ha lasciato intatti i 12 turni reali preesistenti
+   sul 31/08 — Settembre non aveva turni reali prima del test, 0 rimasti dopo la pulizia).
+4. `npx tsc --noEmit`: pulito. `npm run build`: pulito, 16 pagine, nessun errore.
+5. **Non verificato via click nel browser** (stesso limite ricorrente): consigliato che
+   Giacomo apra Settembre 2026, selezioni "Lun 31 Ago — Dom 6 Set" dal selettore e provi
+   Genera/Reset/Chiusure/Mezzogiorno/Maia sull'intera settimana in un giro reale.
