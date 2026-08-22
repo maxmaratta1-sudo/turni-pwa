@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabaseAdmin } from '@/lib/supabase'
 import { ORARI_TURNO_MD, TurnoTipo } from '@/types'
-import { oreFromOrario, ORE_28H_FERIALI, calcolaTurnoRidotto } from '@/lib/generator'
+import { oreFromOrario, ORE_28H_FERIALI, calcolaTurnoRidotto, calcolaTurnoStandardGiorno } from '@/lib/generator'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -132,6 +132,19 @@ const tools: Anthropic.Tool[] = [
     input_schema: {
       type: 'object',
       properties: {},
+    },
+  },
+  {
+    name: 'sposta_riposo',
+    description: 'Sposta il giorno di riposo INFRASETTIMANALE di un dipendente da un giorno a un altro — ripristina un turno di lavoro standard nel vecchio giorno e mette a riposo il nuovo giorno indicato. NON usare per il recupero compensativo domenicale (quello ha un flusso separato, vedi update_shift con recupero_domenicale) — questo tool è solo per uno scambio di riposo "normale" richiesto esplicitamente da Giacomo (es. "cambia il riposo di Romeo da mercoledì a giovedì").',
+    input_schema: {
+      type: 'object',
+      properties: {
+        employee_name: { type: 'string' },
+        vecchio_giorno: { type: 'string', description: 'Data YYYY-MM-DD del riposo da rimuovere — qui verrà ripristinato un turno di lavoro standard' },
+        nuovo_giorno: { type: 'string', description: 'Data YYYY-MM-DD del nuovo giorno di riposo' },
+      },
+      required: ['employee_name', 'vecchio_giorno', 'nuovo_giorno'],
     },
   },
   {
@@ -714,6 +727,68 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     return data.map(r => `[${r.id}] ${r.regola}`).join('\n')
   }
 
+  if (toolName === 'sposta_riposo') {
+    const emp = await findEmployee(input.employee_name, ctx.storeId)
+    if (!emp) return `Errore: dipendente "${input.employee_name}" non trovato.`
+
+    const vecchioGiorno: string = input.vecchio_giorno
+    const nuovoGiorno: string = input.nuovo_giorno
+
+    if (new Date(vecchioGiorno + 'T00:00:00').getDay() === 0 || new Date(nuovoGiorno + 'T00:00:00').getDay() === 0) {
+      return 'Errore: questo tool è solo per il riposo infrasettimanale — non gestisce la domenica (negozio chiuso, non è mai un giorno di riposo "spostabile").'
+    }
+
+    const { data: configRow, error: configErr } = await supabaseAdmin
+      .from('turni_config')
+      .select('config')
+      .eq('store_id', ctx.storeId)
+      .maybeSingle()
+    if (configErr || !configRow?.config) {
+      return `Errore: impossibile leggere turni_config per calcolare il turno standard (${configErr?.message ?? 'nessuna configurazione trovata'}).`
+    }
+
+    const standard = await calcolaTurnoStandardGiorno(emp, configRow.config, ctx.storeId, vecchioGiorno)
+    if (!standard) {
+      return `Errore: non riesco a calcolare un turno standard per ${emp.nome} il ${vecchioGiorno} (dipendente non presente in turni_config, o giorno non gestito) — verifica manualmente e usa update_shift per impostarlo a mano.`
+    }
+
+    // Ripristina un turno di lavoro nel vecchio giorno — orario ESATTO calcolato
+    // da calcolaTurnoStandardGiorno (non passa da upsertShift/ORARI_TURNO_MD:
+    // quel lookup è fisso per tipo e sbaglierebbe per i dipendenti a ore
+    // variabili — Romeo, Denise, Cristina/Stefania — che calcolaTurnoStandardGiorno
+    // gestisce correttamente). Stessa pulizia difensiva del turno spezzato di
+    // upsertShift (righe orfane sequenza>1).
+    await supabaseAdmin.from('shifts').delete()
+      .eq('schedule_id', ctx.scheduleId).eq('employee_id', emp.id).eq('data', vecchioGiorno).gt('sequenza', 1)
+    const { error: errRipristino } = await supabaseAdmin.from('shifts').upsert(
+      {
+        schedule_id: ctx.scheduleId,
+        employee_id: emp.id,
+        data: vecchioGiorno,
+        tipo: standard.tipo,
+        ora_inizio: standard.orario.inizio,
+        ora_fine: standard.orario.fine,
+        sequenza: 1,
+      },
+      { onConflict: 'schedule_id,employee_id,data,sequenza' }
+    )
+    if (errRipristino) {
+      console.error(`[maia-chat] sposta_riposo FALLITO (ripristino ${vecchioGiorno}) — ${emp.nome}:`, errRipristino)
+      return `Errore salvataggio turno ripristinato: ${errRipristino.message}`
+    }
+
+    // Metti a riposo il nuovo giorno — riuso upsertShift normale, stesso
+    // trattamento di qualunque altro riposo (nessun recupero domenicale qui,
+    // questo tool è esplicitamente per il riposo infrasettimanale normale).
+    const { error: errNuovoRiposo } = await upsertShift(ctx.scheduleId, emp.id, nuovoGiorno, 'riposo')
+    if (errNuovoRiposo) {
+      console.error(`[maia-chat] sposta_riposo FALLITO (nuovo riposo ${nuovoGiorno}) — ${emp.nome}:`, errNuovoRiposo)
+      return `Turno ripristinato il ${vecchioGiorno}, ma errore nell'impostare il riposo il ${nuovoGiorno}: ${errNuovoRiposo.message}. Verifica manualmente.`
+    }
+
+    return `OK: riposo di ${emp.nome} spostato da ${vecchioGiorno} a ${nuovoGiorno}. Il ${vecchioGiorno} ora ha un turno "${standard.tipo}" (${standard.orario.inizio}-${standard.orario.fine}).`
+  }
+
   if (toolName === 'get_config') {
     const { data, error } = await supabaseAdmin
       .from('turni_config')
@@ -863,6 +938,15 @@ Il riposo compensativo domenicale NON può mai essere assegnato al SABATO.
 Il sabato è sempre un giorno lavorativo — non può essere usato come recupero.
 Proporre sempre e solo giorni feriali (Lun/Mar/Mer/Gio/Ven) come riposo compensativo.
 Per Romeo vale la regola specifica sotto (SOLO Lun/Mer/Ven, mai Mar/Gio).
+
+CAMBIO RIPOSO INFRASETTIMANALE:
+Quando Giacomo chiede di spostare un giorno di riposo (diverso dal recupero domenicale),
+usa il tool sposta_riposo. Questo ripristina un turno di lavoro normale nel vecchio giorno
+e mette a riposo il nuovo giorno indicato. NON confondere con il riposo compensativo
+domenicale, che ha regole separate (settimana precedente, giorni specifici per contratto,
+tool update_shift con recupero_domenicale) — sposta_riposo è SOLO per uno scambio di
+riposo "normale" (es. "cambia il riposo di Romeo da mercoledì a giovedì questa settimana"),
+mai per il recupero di un turno domenicale già lavorato.
 
 ⚠️ REGOLA CRITICA SULLE ORE (si applica SOLO ai turni lavorativi feriali — mattina/pomeriggio/full — MAI a domenica_lungo/domenica_corto, vedi regola assoluta sotto):
 Le ore settimanali di ogni dipendente DEVONO corrispondere ESATTAMENTE alle ore del contratto.

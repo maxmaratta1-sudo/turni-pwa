@@ -717,10 +717,11 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
     }
   }
 
-  correggiChiusura(shifts, employees, config)
+  correggiChiusura(shifts, employees, config, festiviSet)
   correggiFasciaCentrale(shifts, employees, config, festiviSet)
+  correggiFasciaObbligatoria(shifts, employees, config, festiviSet)
+  correggiBilanciamentoMattinaPomeriggio(shifts, employees, config, festiviSet)
   applicaScontoFestivi(shifts, employees, config, festiviSet)
-  verificaFasciaObbligatoria(shifts, config, giorni)
   verificaBudgetSettimanale(shifts, employees, festiviSet)
 
   return shifts
@@ -939,8 +940,27 @@ export async function generateShiftsMDWeek(params: GenerateWeekParams): Promise<
 /** R7 — Chiusura 20:00: copertura minima da config (regole_generali.copertura_chiusura).
  * Pass di correzione post-generazione: se un giorno non raggiunge la copertura minima,
  * converte turni mattina di cassiere (esclusi non_cassiere, chi ha flessibilita "Nessuna",
- * e Yuri per la fascia obbligatoria) in pomeriggio a parità di ore già assegnate. */
-function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[], config: any): void {
+ * e Yuri per la fascia obbligatoria) in pomeriggio a parità di ore già assegnate.
+ *
+ * 🐛 21/08/2026 (segnalato da Giacomo — "a volte solo 2 persone invece di 3"):
+ * VERIFICATO su 6 mesi di dati reali (luglio-dicembre 2026) — ZERO casi di
+ * sotto-copertura generati da questa funzione (festivi esclusi correttamente
+ * dal check). Test sintetico con assenze crescenti: serve che 8 dipendenti su
+ * 13 siano assenti LO STESSO giorno prima che il pool di candidati si esaurisca
+ * — scenario irrealistico per ferie/assenze normali. Non è quindi il bug reale
+ * più probabile (l'ipotesi "pool eroso dalle ferie" non regge sotto test).
+ * Sospetto più concreto, non risolto qui (fuori scope — servirebbe toccare
+ * maia-chat/route.ts): modifiche manuali post-generazione (update_shift via
+ * Maia, o click diretto in manager/page.tsx) NON ri-eseguono questo pass — se
+ * Giacomo sposta un turno dopo aver generato, la copertura di quel giorno può
+ * rompersi senza che nessuna verifica lo segnali.
+ * Fix applicato qui: la funzione non loggava MAI un warning quando falliva a
+ * raggiungere il minimo (a differenza di correggiFasciaCentrale, che lo fa) —
+ * fallimento silenzioso confermato e corretto, indipendentemente dalla causa
+ * reale della segnalazione. Aggiunta anche l'esclusione domenica/festivi dal
+ * check (mancava — senza festiviSet, ogni domenica/festivo con tutti a riposo
+ * avrebbe generato un falso warning "chiusura scoperta"). */
+function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[], config: any, festiviSet: Set<string>): void {
   const perGiorno: Record<string, Omit<Shift, 'id' | 'created_at'>[]> = {}
   for (const s of shifts) {
     if (!perGiorno[s.data]) perGiorno[s.data] = []
@@ -950,7 +970,10 @@ function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees:
   const cop = config?.regole_generali?.copertura_chiusura ?? { lun_ven: 3, sabato: 4 }
 
   for (const [data, dayShifts] of Object.entries(perGiorno)) {
-    const isSabato = new Date(data + 'T00:00:00').getDay() === 6
+    const dow = new Date(data + 'T00:00:00').getDay()
+    if (dow === 0 || festiviSet.has(data)) continue // negozio chiuso, nessuna copertura attesa
+
+    const isSabato = dow === 6
     const minRichiesto = isSabato ? cop.sabato : cop.lun_ven
     let chiusura = dayShifts.filter(s => s.ora_fine === '20:00').length
     if (chiusura >= minRichiesto) continue
@@ -977,6 +1000,10 @@ function correggiChiusura(shifts: Omit<Shift, 'id' | 'created_at'>[], employees:
       s.ora_inizio = nuovoOrario.inizio
       s.ora_fine = nuovoOrario.fine
       chiusura++
+    }
+
+    if (chiusura < minRichiesto) {
+      console.warn(`[GENERATOR] ⚠️ Copertura chiusura 20:00 scoperta il ${data}: solo ${chiusura}/${minRichiesto} presenti dopo correzione (pool di candidati esaurito, probabilmente troppe assenze simultanee) — verificare manualmente`)
     }
   }
 }
@@ -1070,22 +1097,183 @@ function correggiFasciaCentrale(shifts: Omit<Shift, 'id' | 'created_at'>[], empl
   }
 }
 
-/** K — Verifica (non correzione) della fascia obbligatoria cassa 13:00-16:00: Yuri +
- * almeno N-1 altri cassieri presenti. Logga un warning se scoperta — un vero
- * auto-fix richiederebbe un constraint solver (vedi Opus, Step 3). */
-function verificaFasciaObbligatoria(shifts: Omit<Shift, 'id' | 'created_at'>[], config: any, giorni: Date[]): void {
+/** FIX 2 (21/08/2026, richiesta esplicita Giacomo) — Fascia obbligatoria cassa
+ * 13:00-16:00 come vincolo ASSOLUTO: Yuri + almeno N-1 altri cassieri quando
+ * Yuri lavora, 2 cassieri qualsiasi quando Yuri è assente/ferie. Prima era
+ * SOLO verificata (console.warn, mai corretta — commento originale: "un vero
+ * auto-fix richiederebbe un constraint solver"). Ora è un vero pass di
+ * correzione, stesso identico pattern di correggiFasciaCentrale (12-14): se
+ * la copertura piena (non solo overlap) è sotto il minimo, converte il turno
+ * di una cassiera candidata (mai Yuri — la sua presenza quando lavora conta
+ * già naturalmente nel conteggio, la regola "Yuri + 1 altro" emerge da sola:
+ * se Yuri è in turno quel giorno la fascia è già coperta da lui, serve solo
+ * completare il minimo; se Yuri è assente il minimo va raggiunto interamente
+ * dagli altri) in un orario che copre 13-16 per intero, cercato in
+ * config.legenda_orari con lo stesso helper trovaOrarioCentrale già usato per
+ * la fascia 12-14. */
+function correggiFasciaObbligatoria(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[], config: any, festiviSet: Set<string>): void {
   const fascia = config?.regole_generali?.fascia_obbligatoria_cassa
   if (!fascia) return
+  const minimo = fascia.minimo_cassieri ?? 2
+  const cop = config?.regole_generali?.copertura_chiusura ?? { lun_ven: 3, sabato: 4 }
 
-  for (const giorno of giorni) {
-    if (giorno.getDay() === 0) continue
-    const dataStr = formatDate(giorno)
-    const presenti = shifts.filter(s =>
-      s.data === dataStr && s.ora_inizio && s.ora_fine &&
-      s.ora_inizio <= fascia.inizio && s.ora_fine >= fascia.fine
+  const perGiorno: Record<string, Omit<Shift, 'id' | 'created_at'>[]> = {}
+  for (const s of shifts) {
+    if (!perGiorno[s.data]) perGiorno[s.data] = []
+    perGiorno[s.data].push(s)
+  }
+
+  for (const [data, dayShifts] of Object.entries(perGiorno)) {
+    const dow = new Date(data + 'T00:00:00').getDay()
+    if (dow === 0) continue
+    if (festiviSet.has(data)) continue
+
+    let presenti = dayShifts.filter(s =>
+      s.ora_inizio && s.ora_fine && s.ora_inizio <= fascia.inizio && s.ora_fine >= fascia.fine
     )
-    if (presenti.length < (fascia.minimo_cassieri ?? 2)) {
-      console.warn(`[GENERATOR] ⚠️ Fascia obbligatoria ${fascia.inizio}-${fascia.fine} scoperta il ${dataStr}: solo ${presenti.length}/${fascia.minimo_cassieri} presenti`)
+    if (presenti.length >= minimo) continue
+
+    // 🐛 21/08/2026 — trovaOrarioCentrale può assegnare un orario che non
+    // finisce più alle 20:00 (es. sposta un turno 14-20 a 11-16 per coprire
+    // 13-16) — se quella persona serviva alla copertura chiusura già
+    // corretta da correggiChiusura (che gira PRIMA), la romperebbe
+    // silenziosamente. Stessa protezione già applicata a
+    // correggiBilanciamentoMattinaPomeriggio.
+    const minChiusura = dow === 6 ? cop.sabato : cop.lun_ven
+    let chiusuraCount = dayShifts.filter(s => s.ora_fine === '20:00').length
+
+    const candidati = dayShifts
+      .filter(s => {
+        const emp = employees.find(e => e.id === s.employee_id)
+        if (!emp) return false
+        const nome = emp.nome.trim()
+        if (nome === fascia.presenza_preferita) return false // Yuri, mai spostare — la sua fascia è già fissa
+        const dip = findDip(config, nome)
+        const esclusoStrutturale = dip?.ruolo === 'non_cassiere'
+          || (dip?.flessibilita ?? '').toLowerCase().includes('nessuna')
+        if (esclusoStrutturale) return false
+        if (s.tipo !== 'mattina' && s.tipo !== 'pomeriggio') return false
+        const copreGia = s.ora_inizio! <= fascia.inizio && s.ora_fine! >= fascia.fine
+        if (copreGia) return false
+        if (s.ora_fine === '20:00' && chiusuraCount <= minChiusura) return false // non disfare la copertura chiusura
+        return true
+      })
+      .sort((a, b) => oreFromOrario(b.ora_inizio, b.ora_fine) - oreFromOrario(a.ora_inizio, a.ora_fine))
+
+    for (const s of candidati) {
+      if (presenti.length >= minimo) break
+      if (s.ora_fine === '20:00' && chiusuraCount <= minChiusura) continue
+      const emp = employees.find(e => e.id === s.employee_id)!
+      const dip = findDip(config, emp.nome.trim())
+      const ore = oreFromOrario(s.ora_inizio, s.ora_fine)
+      const nuovoOrario = trovaOrarioCentrale(config, ore, dip, fascia)
+      if (!nuovoOrario) continue
+      const finivaAlleChiusura = s.ora_fine === '20:00'
+      s.ora_inizio = nuovoOrario.inizio
+      s.ora_fine = nuovoOrario.fine
+      if (finivaAlleChiusura && s.ora_fine !== '20:00') chiusuraCount--
+      presenti = [...presenti, s]
+    }
+
+    if (presenti.length < minimo) {
+      console.warn(`[GENERATOR] ⚠️ Fascia obbligatoria ${fascia.inizio}-${fascia.fine} scoperta il ${data}: solo ${presenti.length}/${minimo} presenti dopo correzione — verificare manualmente`)
+    }
+  }
+}
+
+/** FIX 3 (21/08/2026, richiesta esplicita Giacomo) — Bilanciamento mattina/
+ * pomeriggio: la mattina deve avere sempre almeno lo stesso numero di persone
+ * del pomeriggio (mai il contrario), conteggio totale giornaliero su tutti i
+ * reparti/ruoli. "Mattina"/"pomeriggio" sono definiti dall'ORARIO effettivo
+ * (non dalla stringa `tipo`, che varia troppo tra i rami del generatore —
+ * mattina, mattina_corta, full, spezzato_mattina, valori "yuri_*" letti da
+ * config...): un turno conta come mattina se copre almeno un minuto prima
+ * delle 14:00, come pomeriggio se copre almeno un minuto dopo le 14:00 — un
+ * turno lungo (full, o Yuri se il suo pattern quel giorno è più ampio di
+ * 13-16) conta in ENTRAMBI, un turno spezzato conta una volta per riga (la
+ * persona ha coperto davvero entrambe le metà).
+ * Eseguito PER ULTIMO tra i pass strutturali (dopo le due fasce orarie e
+ * dopo correggiChiusura): non tocca MAI un turno che sta coprendo per intero
+ * la fascia_obbligatoria_cassa o la fascia_centrale_obbligatoria di quel
+ * giorno, né un turno che finisce alle 20:00 SE serve a soddisfare la
+ * copertura chiusura minima di quel giorno — per non disfare le correzioni
+ * già applicate sopra. Esclude anche Yuri (fascia fissa) e Gilda/Tony
+ * (pattern_standard.lun_sab — fissi mattina per contratto, come da esempio
+ * esplicito nella richiesta).
+ * 🐛 21/08/2026 — bug trovato in fase di test (18 violazioni chiusura su dati
+ * reali dopo aver aggiunto questo pass): senza la protezione sulla chiusura,
+ * questa funzione riconvertiva a mattina esattamente i turni che
+ * correggiChiusura aveva appena spostato a pomeriggio per raggiungere il
+ * minimo, disfacendo quella correzione. Corretto PRIMA del deploy — mai
+ * arrivato in produzione. */
+function correggiBilanciamentoMattinaPomeriggio(shifts: Omit<Shift, 'id' | 'created_at'>[], employees: Employee[], config: any, festiviSet: Set<string>): void {
+  const perGiorno: Record<string, Omit<Shift, 'id' | 'created_at'>[]> = {}
+  for (const s of shifts) {
+    if (!perGiorno[s.data]) perGiorno[s.data] = []
+    perGiorno[s.data].push(s)
+  }
+
+  const fasciaObbl = config?.regole_generali?.fascia_obbligatoria_cassa
+  const fasciaCentr = config?.regole_generali?.fascia_centrale_obbligatoria
+  const cop = config?.regole_generali?.copertura_chiusura ?? { lun_ven: 3, sabato: 4 }
+
+  const copreFasciaProtetta = (s: Omit<Shift, 'id' | 'created_at'>): boolean => {
+    if (!s.ora_inizio || !s.ora_fine) return false
+    if (fasciaObbl && s.ora_inizio <= fasciaObbl.inizio && s.ora_fine >= fasciaObbl.fine) return true
+    if (fasciaCentr && s.ora_inizio <= fasciaCentr.inizio && s.ora_fine >= fasciaCentr.fine) return true
+    return false
+  }
+
+  const isMattina = (s: Omit<Shift, 'id' | 'created_at'>) => !!s.ora_inizio && s.ora_inizio < '14:00'
+  const isPomeriggio = (s: Omit<Shift, 'id' | 'created_at'>) => !!s.ora_fine && s.ora_fine > '14:00'
+
+  for (const [data, dayShifts] of Object.entries(perGiorno)) {
+    const dow = new Date(data + 'T00:00:00').getDay()
+    if (dow === 0) continue
+    if (festiviSet.has(data)) continue
+
+    const minChiusura = dow === 6 ? cop.sabato : cop.lun_ven
+    let chiusuraCount = dayShifts.filter(s => s.ora_fine === '20:00').length
+
+    let mattinaCount = dayShifts.filter(isMattina).length
+    let pomeriggioCount = dayShifts.filter(isPomeriggio).length
+    if (pomeriggioCount <= mattinaCount) continue
+
+    const candidati = dayShifts
+      .filter(s => {
+        const emp = employees.find(e => e.id === s.employee_id)
+        if (!emp) return false
+        const nome = emp.nome.trim()
+        if (nome === (fasciaObbl?.presenza_preferita ?? 'Yuri')) return false
+        const dip = findDip(config, nome)
+        if ((dip?.flessibilita ?? '').toLowerCase().includes('nessuna')) return false
+        if (dip?.pattern_standard?.lun_sab) return false // Gilda/Tony, fissi mattina — mai da toccare qui
+        if (!isPomeriggio(s) || isMattina(s)) return false // deve essere SOLO pomeriggio
+        if (copreFasciaProtetta(s)) return false // non disfare le fasce orarie già corrette sopra
+        if (s.ora_fine === '20:00' && chiusuraCount <= minChiusura) return false // non disfare la copertura chiusura già corretta sopra
+        return true
+      })
+      .sort((a, b) => oreFromOrario(b.ora_inizio, b.ora_fine) - oreFromOrario(a.ora_inizio, a.ora_fine))
+
+    for (const s of candidati) {
+      if (pomeriggioCount <= mattinaCount) break
+      if (s.ora_fine === '20:00' && chiusuraCount <= minChiusura) continue // ricontrollo: chiusuraCount può essere sceso durante il loop
+      const emp = employees.find(e => e.id === s.employee_id)!
+      const dip = findDip(config, emp.nome.trim())
+      const ore = oreFromOrario(s.ora_inizio, s.ora_fine)
+      const isCassiera22 = dip?.alternanza?.gruppo === '22h'
+      const nuovoOrario = isCassiera22 ? orarioMattinaFlessibile(ore) : orarioMattina(ore)
+      const finivaAlleChiusura = s.ora_fine === '20:00'
+      s.tipo = 'mattina'
+      s.ora_inizio = nuovoOrario.inizio
+      s.ora_fine = nuovoOrario.fine
+      if (finivaAlleChiusura) chiusuraCount--
+      mattinaCount++
+      pomeriggioCount--
+    }
+
+    if (pomeriggioCount > mattinaCount) {
+      console.warn(`[GENERATOR] ⚠️ Bilanciamento mattina/pomeriggio non raggiunto il ${data}: mattina=${mattinaCount} pomeriggio=${pomeriggioCount} (nessun candidato convertibile senza rompere altre regole) — verificare manualmente`)
     }
   }
 }
@@ -1112,4 +1300,118 @@ function getDaysInMonth(anno: number, mese: number): Date[] {
 
 function formatDate(d: Date): string {
   return d.toISOString().split('T')[0]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX 4 (21/08/2026) — cambio riposo infrasettimanale via Maia (tool
+// `sposta_riposo`, src/app/api/maia-chat/route.ts): ripristina un turno di
+// lavoro "standard" nel vecchio giorno di riposo, secondo il pattern del
+// dipendente. Riusa gli stessi helper del generatore vero (findDip,
+// chiMattinaMaxRomeo, direzioneSabatoFormula, orarioMattina/Pomeriggio/
+// FromSlug) invece di duplicarli — stessa fonte di verità.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Calcola il turno "standard" (tipo + orario) che un dipendente farebbe in un
+ * giorno feriale/sabato specifico, SENZA passare per generateShiftsMD (che
+ * gira su TUTTI i dipendenti insieme e applica i pass di correzione — usarlo
+ * per un solo dipendente isolato applicherebbe quei pass a un quadro parziale
+ * e fasullo, es. correggiChiusura convertirebbe il turno anche se non serve
+ * davvero per l'intero negozio). Copre fedelmente i pattern FISSI/calcolabili
+ * in isolamento (R1 Gilda/Tony, Yuri, Denise, Max/Romeo alternanza AB,
+ * Cristina/Stefania). Per Carlo e le cassiere 22h (distribuzione ore dinamica,
+ * richiede il contesto dell'intera settimana per sapere quante ore restano
+ * da spalmare sui giorni rimanenti — non calcolabile per un giorno isolato
+ * senza rigenerare l'intera settimana) usa un fallback semplificato
+ * (mattina, ore = getMaxOreGiorno) — DOCUMENTATO, non un bug nascosto: se
+ * serve esattezza per questi dipendenti specifici, va rigenerata la
+ * settimana con generateShiftsMDWeek invece di usare sposta_riposo. */
+export async function calcolaTurnoStandardGiorno(
+  emp: Pick<Employee, 'nome' | 'ore_settimanali'>, config: any, storeId: string, dataStr: string
+): Promise<{ tipo: TurnoTipo; orario: { inizio: string; fine: string } } | null> {
+  const nome = emp.nome.trim()
+  const dip = findDip(config, nome)
+  if (!dip) return null
+
+  const d = new Date(dataStr + 'T00:00:00')
+  const dayOfWeek = d.getDay()
+  if (dayOfWeek === 0) return null // domenica non gestita da questa funzione — mai chiamata per un riposo infrasettimanale domenicale
+
+  // R1 — Gilda/Tony: pattern fisso, sempre mattina.
+  if (dip.pattern_standard?.lun_sab) {
+    const slot = dip.pattern_standard.lun_sab
+    return { tipo: 'mattina', orario: orarioFromSlug(slot.orario) }
+  }
+
+  // Yuri — pattern per-giorno esplicito in config.
+  if (nome === 'Yuri') {
+    const giornoKey = ['domenica', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi', 'sabato'][dayOfWeek]
+    const slot = dip.pattern_standard?.[giornoKey]
+    if (slot && typeof slot === 'object') {
+      return { tipo: slot.tipo as TurnoTipo, orario: orarioFromSlug(slot.orario) }
+    }
+    return { tipo: 'mattina', orario: orarioMattina(6) }
+  }
+
+  // Denise — 40h su 6 giorni, ore fisse per giorno, sabato con direzione alternata.
+  if (nome === 'Denise') {
+    const ORE_DENISE: Record<number, number> = { 1: 8, 2: 6, 3: 6, 4: 8, 5: 6, 6: 6 }
+    const ore = ORE_DENISE[dayOfWeek] ?? 6
+    if (dayOfWeek === 6) {
+      const direzione = direzioneSabatoFormula('Denise', dataStr)
+      return { tipo: direzione, orario: direzione === 'mattina' ? orarioMattina(ore) : orarioPomeriggio(ore) }
+    }
+    const mattinaGiorni = [1, 3, 5]
+    const tipo: TurnoTipo = mattinaGiorni.includes(dayOfWeek) ? 'mattina' : 'pomeriggio'
+    return { tipo, orario: tipo === 'mattina' ? orarioMattina(ore) : orarioPomeriggio(ore) }
+  }
+
+  // Max/Romeo — alternanza settimanale AB.
+  if (dip.alternanza?.gruppo === 'AB') {
+    const monday = getMonday(dataStr)
+    const alternanza = await chiMattinaMaxRomeo(storeId, monday)
+    const mattinaOra = alternanza.mattina === nome
+
+    if (nome === 'Max') {
+      const slot = mattinaOra ? dip.pattern_standard.mattina : dip.pattern_standard.pomeriggio
+      const tipo: TurnoTipo = mattinaOra ? 'mattina_corta' : 'pomeriggio_corto'
+      return { tipo, orario: orarioFromSlug(slot.orario) }
+    }
+    // Romeo
+    let ore: number
+    if (dayOfWeek === 6) {
+      const oreFeriali = 5 + 4 + 5 + 4 + 5
+      ore = Math.min(getMaxOreGiorno(dip), Math.max(5, emp.ore_settimanali - oreFeriali))
+    } else {
+      const giornoKey = ['', 'lunedi', 'martedi', 'mercoledi', 'giovedi', 'venerdi'][dayOfWeek]
+      ore = dip.pattern_standard[giornoKey]?.ore ?? 4
+    }
+    const tipo: TurnoTipo = mattinaOra ? 'mattina' : 'pomeriggio'
+    return { tipo, orario: mattinaOra ? orarioMattina(ore) : orarioPomeriggio(ore) }
+  }
+
+  // Cristina/Stefania — sempre opposte, ore feriali da ORE_28H_FERIALI, sabato 6h fisse.
+  if (nome === 'Cristina' || nome === 'Stefania') {
+    const cristinaMattinaGiorni = [1, 3, 5]
+    const cristinaEMattina = cristinaMattinaGiorni.includes(dayOfWeek)
+    const eMattina = nome === 'Cristina' ? cristinaEMattina : !cristinaEMattina
+
+    if (dayOfWeek === 6) {
+      const direzioneCristina = direzioneSabatoFormula('Cristina', dataStr)
+      const mia = nome === 'Cristina' ? direzioneCristina : (direzioneCristina === 'mattina' ? 'pomeriggio' : 'mattina')
+      return { tipo: mia, orario: mia === 'mattina' ? orarioMattina(6) : orarioPomeriggio(6) }
+    }
+    const ore = ORE_28H_FERIALI[dayOfWeek] ?? 4
+    const tipo: TurnoTipo = eMattina ? 'mattina' : 'pomeriggio'
+    return { tipo, orario: eMattina ? orarioMattina(ore) : orarioPomeriggio(ore) }
+  }
+
+  // Carlo / cassiere 22h / altri — distribuzione ore dinamica, richiede il
+  // contesto dell'intera settimana (vedi commento sopra la funzione).
+  // Fallback semplificato e DOCUMENTATO: mattina, ore = max_ore_giorno.
+  const oreFallback = getMaxOreGiorno(dip)
+  const isCassiera22 = dip.alternanza?.gruppo === '22h'
+  return {
+    tipo: 'mattina',
+    orario: isCassiera22 ? orarioMattinaFlessibile(oreFallback) : orarioMattina(oreFallback),
+  }
 }
