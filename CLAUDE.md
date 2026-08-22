@@ -675,3 +675,82 @@ direttamente, ma da aggiornare se mai tornasse in uso.
   faccia un giro di verifica manuale reale (login → genera turni → chiedi qualcosa a
   Maia → esporta PDF) alla prima occasione, per chiudere il cerchio su questo punto
   specifico.
+
+## Bug "prima settimana di Settembre non gestibile" — settimane a cavallo tra mesi (22 agosto 2026)
+
+### Sintomo segnalato da Giacomo
+
+Aprendo Settembre 2026 e provando a selezionare la prima settimana (che inizia a
+cavallo con Agosto), il sistema non permetteva di lavorare correttamente sui primi
+giorni del mese.
+
+### Causa esatta (confermata leggendo il codice + trace numerico reale, non solo ipotesi)
+
+`getSettimaneLunDom` (`src/app/manager/page.tsx`) riceve sempre un array `giorni` già
+STRETTAMENTE delimitato a un solo mese calendario (`getDays(anno, mese)` interrompe il
+`while` non appena si passa al mese successivo — non genera mai giorni di un mese
+diverso). Dentro quell'array mono-mese, la funzione cercava l'INDICE del primo Lunedì
+del mese e iniziava a raggruppare le settimane da lì (`start = firstMondayIdx`) —
+scartando silenziosamente ogni giorno prima di quel lunedì.
+
+Verificato con trace reale (replica esatta di `getDays`/`getSettimaneLunDom` per
+Agosto e Settembre 2026):
+- **Agosto 2026** (1° = sabato): Sab1/Dom2 (prima del primo lunedì, 3 agosto)
+  scomparivano da ogni voce; il frammento finale (Lun31, 1 giorno solo) veniva invece
+  già incluso — trattamento **asimmetrico** tra inizio e fine mese.
+- **Settembre 2026** (1° = martedì, primo lunedì = 7 settembre): **Mar1, Mer2, Gio3,
+  Ven4, Sab5, Dom6 — 6 giorni interi, l'intera prima settimana reale del mese — non
+  comparivano in NESSUNA voce del selettore "Sett. N"**. Non selezionabili, non
+  generabili via "⚡ Genera settimana", nessun pannello Chiusure/Mezzogiorno, "✨ Lavora
+  su questa settimana" con Maia non disponibile per quei giorni. Il blocco era
+  specifico alle funzionalità week-scoped: la tabella mensile normale (click diretto
+  sulla cella, "Genera turni" mese intero) restava comunque utilizzabile su quei
+  giorni, perché itera `giorni` direttamente senza passare da `getSettimaneLunDom`.
+
+**Punto architetturale (relazione schedule↔mese)**: confermato che oggi nessuna
+"settimana" attraversa mai due `schedule_id` diversi — `getDays`/`getSettimaneLunDom`
+operano sempre dentro un solo mese/schedule per costruzione. Stessa lacuna
+architetturale confermata indipendentemente anche lato backend
+(`generateShiftsMDWeek` in `src/lib/generator.ts` deriva `mese`/`anno` solo da
+`weekStart` e delega al generatore mono-mese `generateShiftsMD`).
+
+### Soluzione scelta (delle due valutate con Max)
+
+Valutate due direzioni:
+1. Costruire una VERA settimana Lun-Dom unificata che attraversa due `schedule_id`
+   diversi (es. Ago31+Sett1-6 come unica entità), scrivendo sui due schedule.
+2. Rendere simmetrico il trattamento già esistente per il frammento finale di mese:
+   includere sempre anche il frammento INIZIALE (giorni prima del primo lunedì) come
+   sua propria voce nel selettore, invece di scartarlo.
+
+**Scelta: opzione 2** — rischio molto più basso (nessuna scrittura cross-schedule:
+`generaSettimana`/`resetSettimana` già gestivano correttamente i chunk parziali,
+verificato leggendo il codice, perché derivano `weekStart`/`weekEnd` dai giorni reali
+del chunk selezionato, non assumono che inizi di lunedì) e risolve esattamente il
+sintomo bloccante segnalato — i giorni erano INVISIBILI, non semplicemente raggruppati
+in un modo inatteso. Non risolve la sovrapposizione "vera" (Ago31 resta un frammento
+di 1 giorno nel selettore di agosto, Sett1-6 un frammento di 6 giorni in quello di
+settembre — non un'unica settimana Lun-Dom unificata), scelta deliberata e comunicata
+a Max, non un compromesso nascosto.
+
+### Fix (`src/app/manager/page.tsx`, `getSettimaneLunDom`)
+
+Aggiunto un blocco che, se esiste un frammento di giorni prima del primo lunedì del
+mese (`start > 0`), lo inserisce come propria voce del selettore PRIMA delle settimane
+piene — stessa logica già usata per il frammento finale di mese incompleto, ora
+applicata anche all'inizio. Le settimane piene restano allineate Lun-Dom esattamente
+come prima (nessuna regressione sulle settimane normali).
+
+### Test finale
+
+Trace numerico rieseguito con la funzione corretta, Agosto e Settembre 2026:
+- Agosto: `Sab1,Dom2` (2gg) → 4 settimane piene Lun-Dom → `Lun31` (1gg) — 6 voci totali.
+- Settembre: `Mar1,Mer2,Gio3,Ven4,Sab5,Dom6` (6gg, **ora selezionabile**) → 3 settimane
+  piene Lun-Dom → `Lun28,Mar29,Mer30` (3gg) — 5 voci totali (prima erano 4, la prima
+  settimana reale mancava del tutto).
+- `npx tsc --noEmit`: pulito.
+- `npm run build`: pulito, 16 pagine, nessun errore.
+- **Non verificato via click nel browser** (stesso limite ricorrente — nessuna
+  credenziale manager in questa sessione): consigliato che Giacomo apra Settembre 2026
+  e confermi che "Mar1 — Dom6 Settembre" compaia ora nel selettore e sia utilizzabile
+  (genera/reset/Chiusure/Mezzogiorno/Maia).

@@ -1747,13 +1747,45 @@ function getOffsetLunedi(anno: number, mese: number): number {
   return primoGiorno === 0 ? 6 : primoGiorno - 1
 }
 
-/** Settimane reali Lun-Dom del mese (per il PDF settimanale) — sempre a partire dal
- * primo Lunedì del mese, gruppi di 7 giorni consecutivi che finiscono di Domenica. */
+/** Settimane del mese, raggruppate per confini Lun-Dom quando possibile — gruppi di 7
+ * giorni consecutivi che finiscono di Domenica, a partire dal primo Lunedì del mese.
+ *
+ * 🐛 22/08/2026 (bug segnalato — "prima settimana di Settembre non gestibile"): prima
+ * di questo fix, `start` saltava direttamente al primo lunedì TROVATO DENTRO IL MESE,
+ * scartando silenziosamente ogni giorno prima di quel lunedì — per un mese come
+ * settembre 2026 (1° = martedì), i giorni 1-6 settembre (l'intera settimana reale
+ * Lun31Ago-Dom6Set, tolto il 31 agosto che appartiene ad agosto) non comparivano in
+ * NESSUNA voce del selettore "Sett. N": non selezionabili, non generabili via "Genera
+ * settimana", nessun pannello Chiusure/Mezzogiorno per quei giorni. Il frammento
+ * finale del mese (es. "Lun 31" da solo, ad agosto) veniva invece già incluso — stesso
+ * trattamento ora esteso al frammento iniziale, invece di scartarlo. Non risolve la
+ * sovrapposizione REALE tra mesi (una settimana non attraversa mai due schedule_id,
+ * anche dopo questo fix — Ago31 resta un frammento di 1 giorno nel selettore di
+ * agosto, Sett1-6 un frammento di 6 giorni in quello di settembre, non un'unica
+ * settimana Lun-Dom unificata) — soluzione scelta deliberatamente più semplice e a
+ * basso rischio (nessuna scrittura cross-schedule) rispetto a unificarle, perché
+ * risolve il sintomo bloccante reale (i giorni erano INVISIBILI, non "raggruppati in
+ * modo diverso da quanto ci si aspetterebbe") senza toccare generaSettimana/
+ * resetSettimana (che già gestiscono correttamente i chunk parziali, verificato). */
 function getSettimaneLunDom(giorni: ReturnType<typeof getDays>, mese: number): { label: string; giorni: ReturnType<typeof getDays> }[] {
   const firstMondayIdx = giorni.findIndex(g => new Date(g.data + 'T00:00:00').getDay() === 1)
   const start = firstMondayIdx === -1 ? 0 : firstMondayIdx
   const nomeMese = MESI[mese - 1]
   const settimane: { label: string; giorni: ReturnType<typeof getDays> }[] = []
+
+  // Frammento iniziale (giorni prima del primo Lunedì del mese, es. Sett1-6 2026): prima
+  // veniva scartato silenziosamente — ora incluso come voce a sé, stesso trattamento già
+  // riservato al frammento finale di mese incompleto (vedi commento sopra la funzione).
+  if (start > 0) {
+    const chunk = giorni.slice(0, start)
+    const primo = chunk[0]
+    const ultimo = chunk[chunk.length - 1]
+    settimane.push({
+      label: `${primo.giorno} ${primo.num} — ${ultimo.giorno} ${ultimo.num} ${nomeMese}`,
+      giorni: chunk,
+    })
+  }
+
   for (let i = start; i < giorni.length; i += 7) {
     const chunk = giorni.slice(i, i + 7)
     if (chunk.length === 0) continue
