@@ -1,8 +1,24 @@
 # TURNI PWA — Context per Claude Code
 
 ## Progetto
-PWA per gestione turni settimanali/mensili per negozi retail.
-Cliente pilota: Adele — Stroili Oasi Lanciano.
+PWA per gestione turni settimanali/mensili — **esclusivamente MD Lanciano** (manager
+Giacomo), a partire dal 22 agosto 2026.
+
+**Nota storica**: in passato il progetto supportava anche un secondo cliente, Stroili
+Oasi Lanciano (manager Adele) — algoritmo generico a ore/contratto (20h/30h/40h, turni
+fissi 9-14/14-20/9-20), completamente separato dalla logica MD (config-driven via
+`turni_config`). Rimosso il 22 agosto 2026: progetto Stroili in stand-by indefinito da
+settimane, il codice condiviso (branch condizionali `isMD`/Stroili, costanti duplicate,
+store separati nello stesso DB) causava confusione e interferenze reali nel lavoro su MD
+(es. un bug di match store — "Stroili Oasi Lanciano" scambiato per "MD Lanciano" — trovato
+proprio durante un fix urgente MD). Rimossi ~385 righe di codice condizionale/duplicato
+(generator.ts, manager/page.tsx, MaiaChatBubble.tsx, types/index.ts, 2 route API) e tutti
+i dati Stroili da Supabase (11 employees, 1 manager, 2 schedules, 312 shifts, 6
+unavailabilities, 1 store — verificato che nessun'altra tabella referenziasse quegli ID
+prima di cancellare). **Se in futuro serve Stroili (o un cliente simile) di nuovo, NON
+riesumare questo codice — ripartire da un progetto pulito.** La cronologia Git di questo
+repo conserva comunque l'implementazione originale, recuperabile per riferimento se serve
+capire come funzionava.
 
 ## Stack
 - Next.js 14 (App Router) + TypeScript
@@ -10,21 +26,20 @@ Cliente pilota: Adele — Stroili Oasi Lanciano.
 - Vercel (deploy)
 - Deploy: `npx vercel --prod`
 
-## Struttura turni
-- Mattina: 09:00–14:00 (5h)
-- Pomeriggio: 14:00–20:00 (6h)
-- Full: 09:00–20:00 (9h effettive con pausa)
-- Riposo
+## Struttura turni (MD Lanciano)
+Config-driven da `turni_config` (Supabase, JSONB) — non ci sono più orari fissi
+hardcoded uguali per tutti. Vedi sezione "MD Lanciano — generatore config-driven" sotto
+per il dettaglio completo (pattern per dipendente, fasce obbligatorie, alternanze).
 
-## Contratti dipendenti
-- 20h settimanali → ~87h mensili
-- 30h settimanali → ~130h mensili
-- 40h settimanali → ~173h mensili
+## Contratti dipendenti (MD Lanciano)
+22h, 28h, 30h, 35h, 36h, 40h, 46h settimanali — target mensili in `ORE_MENSILI_MD`
+(`src/types/index.ts`).
 
 ## Flusso
 1. Manager crea piano mese
 2. Ogni dipendente accede via link token personale → segna indisponibilità
-3. Manager genera turni automaticamente (algoritmo in src/lib/generator.ts)
+3. Manager genera turni automaticamente (algoritmo in src/lib/generator.ts,
+   `generateShiftsMD`/`generateShiftsMDWeek` — unico entry point, nessun ramo alternativo)
 4. Manager aggiusta manualmente se serve → pubblica
 5. Dipendenti vedono i propri turni
 
@@ -32,12 +47,17 @@ Cliente pilota: Adele — Stroili Oasi Lanciano.
 - NEXT_PUBLIC_SUPABASE_URL
 - NEXT_PUBLIC_SUPABASE_ANON_KEY
 - SUPABASE_SERVICE_ROLE_KEY
-- NEXT_PUBLIC_STORE_ID (ID del negozio in Supabase)
+- NEXT_PUBLIC_STORE_ID (ID del negozio in Supabase) — ⚠️ **verificato il 21/08/2026 che
+  su Vercel punta all'ID di Stroili** (`0354fca4-...`, ora cancellato), non a MD Lanciano
+  (`a1a56d3b-...`) — nessun codice attivo lo legge più direttamente (il flusso reale passa
+  sempre da `localStorage.turni_store_id`, popolato dal login), ma se in futuro qualcosa
+  torna a usare questa env var, va aggiornata su Vercel prima.
 - MANAGER_SECRET (password accesso pagina manager)
 
 ## Note
-- Domenica: negozio chiuso (da confermare con Adele)
-- Il generatore Stroili (default) usa un algoritmo greedy basato su ore rimanenti/giorni rimanenti — invariato
+- Domenica: gestita da MD Lanciano (turni domenicali assegnati manualmente da Giacomo,
+  vedi generatore sotto — non è più "negozio chiuso di default" come nell'algoritmo Stroili
+  rimosso)
 - RLS Supabase: da configurare (per ora service role per tutto)
 - Repo: maxmaratta1-sudo/turni-pwa
 
@@ -554,3 +574,104 @@ e la correzione del bug di interazione tra i pass. `npx tsc --noEmit` pulito ad 
 step. Route di debug rimossa e confermata 404 dopo l'uso.
 **⚠️ Non verificato via click nel browser** (stesso limite login email/password
 ricorrente in questo file) — verificato solo a livello di generazione/DB.
+
+---
+
+## Rimozione completa Stroili — progetto ora esclusivamente MD Lanciano (22 agosto 2026)
+
+Vedi anche la nota storica in cima a questo file. Dettaglio tecnico completo della
+rimozione:
+
+### STEP 1 — Inventario (prima di cancellare qualunque cosa)
+
+**Codice condizionale trovato** — 5 file:
+- `src/lib/generator.ts`: `generateShifts()` era un router (`if storeNome===MD →
+  generateShiftsMD, else → generateShiftsDefault`); `generateShiftsDefault` +
+  `chooseTurno` + `getTurnoOrario` (~90 righe) erano l'algoritmo greedy usato solo da
+  Stroili.
+- `src/app/manager/page.tsx` — di gran lunga il più coinvolto, **60+ occorrenze di
+  `isMD`**: ordinamento dipendenti, formato celle (lettere M/Pm/F per Stroili vs orari
+  reali per MD), export PDF (due mappe colore separate `colorMD`/`colorStroili`),
+  pannelli Chiusure/Mezzogiorno/turno spezzato/ferie-permessi/festivi/colonna TOT (tutti
+  solo-MD).
+- `src/components/MaiaChatBubble.tsx`: l'intero componente si disattivava
+  (`return null`) se `!isMD` — Maia non esisteva per Stroili.
+- `src/app/api/shifts/generate-week/route.ts`: bloccava `use_opus` se lo store non era
+  MD Lanciano.
+- `src/types/index.ts`: `ORE_TURNO`/`ORARI_TURNO` (Stroili, orari fissi 9-14/14-20/9-20)
+  duplicavano `ORE_TURNO_MD`/`ORARI_TURNO_MD`.
+
+**Non coinvolti** (già store-agnostici): `login/page.tsx`, `api/auth/login/route.ts`,
+`dipendente/[token]/page.tsx`.
+
+**Correzione trovata nello script SQL fornito**: usava nomi tabella con prefisso
+`turni_` (`turni_shifts`, `turni_employees`, ecc.) — **non esistono nello schema reale**,
+che usa nomi senza prefisso (`shifts`, `employees`, `schedules`, `unavailabilities`,
+`managers`, `stores`). Corretto prima di eseguire.
+
+**Record reali contati** (route di debug temporanea, sola lettura): 11 employees, 1
+manager (`adele-gioielleria.it`), 2 schedules (luglio e agosto 2026), 312 shifts, 6
+unavailabilities, 1 store.
+
+**Check FK/riferimenti esterni** (richiesto esplicitamente prima di cancellare): nessun
+riferimento trovato in `turni_festivi`, `turni_alternanza`, `turni_config` (0 righe per
+lo store_id di Stroili in tutte e tre), né in `ferie_saldo` (0 righe per gli
+employee_id di Stroili) — queste tabelle sono tutte funzionalità aggiunte dopo,
+esclusivamente per MD. Solo `shifts` e `unavailabilities` referenziavano dati Stroili,
+già previste nello script di cancellazione.
+
+### STEP 2 — Rimozione codice
+
+`manager/page.tsx` riscritto per intero (troppe occorrenze `isMD` intrecciate per edit
+puntuali senza rischio di errore) — ogni `isMD ? A : B` → `A`, ogni `isMD &&`/`!isMD &&`
+→ rimosso (mai/sempre), rimossi `colorStroili`, `TURNO_CYCLE` + il ramo Stroili di
+`nextTurno` (e la funzione `nextTurno` stessa una volta rimasto il solo chiamante
+`cycleShift`, diventata a sua volta irraggiungibile e rimossa), il ramo alfabetico di
+`sortEmployees`, la legenda M/Pm/F/Riposo in fondo alla tabella.
+`generator.ts`: rimossi `generateShiftsDefault`/`chooseTurno`/`getTurnoOrario`,
+`generateShifts()` router eliminato — `generateShiftsMD` è ora l'unico entry point
+(chiamato direttamente da `shifts/generate/route.ts`, senza più bisogno di leggere il
+nome dello store per decidere l'algoritmo).
+`types/index.ts`: rimossi `ORE_TURNO`/`ORARI_TURNO` (Stroili) e infine
+`MD_LANCIANO_STORE_NOME` stesso (diventato un import orfano una volta rimossa ogni
+logica di routing che lo confrontava).
+`MaiaChatBubble.tsx`: rimossa la prop `isMD` (il componente era già di fatto MD-only).
+
+Deciso di **non rinominare** `ORE_TURNO_MD`/`ORARI_TURNO_MD`/`generateShiftsMD`/
+`generateShiftsMDWeek` togliendo il suffisso "MD" (ora ridondante, essendo l'unico
+algoritmo) — rinominare in tutto il codebase avrebbe aumentato il rischio senza un
+beneficio reale, il suffisso resta come artefatto storico innocuo.
+
+**Verificato ad ogni fase**: `npx tsc --noEmit` pulito, `npm run build` completato senza
+errori (16 pagine generate, nessun riferimento orfano).
+
+### STEP 3 — Cancellazione dati (dopo conferma esplicita di Max)
+
+Eseguita via route di debug temporanea (stesso pattern service-role delle altre verifiche
+in questo file) con lo script SQL corretto (nomi tabella reali). Risultato, combaciante
+esattamente con l'inventario dello STEP 1: **312 shifts, 6 unavailabilities, 2 schedules,
+11 employees, 1 manager, 1 store cancellati**, nessun errore. Route di debug rimossa e
+confermata (implicitamente, tramite il redeploy pulito successivo) non più presente.
+
+### STEP 4 — Documentazione
+
+Questo file: rimossa la sezione progetto generica (cliente pilota Adele/Stroili),
+sostituita con la nota storica in cima; sezione "Struttura turni"/"Contratti dipendenti"
+aggiornate per riflettere MD Lanciano (config-driven, 22-46h) invece dei valori fissi
+Stroili (9-14/14-20/9-20, 20/30/40h); segnalato che `NEXT_PUBLIC_STORE_ID` su Vercel
+punta ancora all'ID (ora cancellato) di Stroili — nessun codice attivo lo legge più
+direttamente, ma da aggiornare se mai tornasse in uso.
+
+### Test finale
+
+- `npm run build`: pulito, 16 pagine, nessun errore.
+- `npx tsc --noEmit`: pulito.
+- Grep esaustivo (`Stroili`, `isMD`, `MD_LANCIANO_STORE_NOME`) su tutto `src/`: **zero
+  occorrenze residue**.
+- **Non verificato via click nel browser** (stesso limite login email/password
+  ricorrente in questo file — nessuna credenziale manager disponibile in questa sessione)
+  — login, generazione, Maia e PDF non sono stati testati end-to-end nella UI reale in
+  questo giro. Verificato solo a livello di build/typecheck/DB. **Consigliato**: Giacomo
+  faccia un giro di verifica manuale reale (login → genera turni → chiedi qualcosa a
+  Maia → esporta PDF) alla prima occasione, per chiudere il cerchio su questo punto
+  specifico.
