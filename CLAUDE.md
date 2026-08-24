@@ -837,3 +837,115 @@ questo giro — resta un bug noto isolato, da correggere separatamente se necess
 5. **Non verificato via click nel browser** (stesso limite ricorrente): consigliato che
    Giacomo apra Settembre 2026, selezioni "Lun 31 Ago — Dom 6 Set" dal selettore e provi
    Genera/Reset/Chiusure/Mezzogiorno/Maia sull'intera settimana in un giro reale.
+
+
+## Il 31 agosto restava vuoto — la tabella mostrava solo i giorni del mese calendario (24/08/2026)
+
+### Sintomo segnalato da Giacomo (2 screenshot)
+
+Dopo il fix del 25/08 (settimane VERE a cavallo), aprendo **Settembre 2026**:
+1. la voce "Sett. 1: Lun 31 — Dom 6 Agosto — Settembre" c'è nel selettore, ma dopo
+   "⚡ Genera settimana" la colonna **Lun** resta vuota per tutti i dipendenti;
+2. anche dopo "⚡ Genera turni" (mese intero di Settembre) quella colonna Lun resta
+   grigia e non cliccabile, mentre Mar-Sab hanno i turni.
+
+### Causa esatta (traccia numerica sulle funzioni reali, non ipotesi)
+
+**Non era la scrittura: era la tabella che non aveva dove mostrare quel giorno.**
+Le colonne della tabella venivano da `giorniOrdinati = getDays(anno, mese)` — per
+costruzione **solo i giorni del mese calendario** (`getDays` si ferma appena cambia
+mese). Traccia eseguita sulle funzioni reali, Settembre 2026:
+- colonne reali: `2026-09-01 → 2026-09-30`, **`2026-08-31` presente: false**;
+- `offsetLunedi = 1` → viene renderizzata **1 cella grigia di allineamento** con
+  l'etichetta "Lun" (`<th className="bg-gray-50">` + `<td className="bg-gray-50" />`,
+  senza contenuto e senza `onClick` per costruzione).
+
+Quella cella grigia "Lun" **è** la colonna che si vede nei due screenshot: non è il 31
+agosto, è il segnaposto di allineamento del calendario — sempre vuoto e non cliccabile,
+qualunque cosa ci sia nel DB. Il 31 agosto non aveva **nessuna** colonna nella vista di
+Settembre, quindi i suoi turni (generati e salvati correttamente sotto lo `schedule_id`
+di Agosto — comportamento già verificato nel test del 25/08: 13 turni sul 31/08 sotto
+Agosto, 0 finiti sotto Settembre) non potevano comparire da nessuna parte.
+Stessa spiegazione per il punto 2: "Genera turni" su Settembre genera — correttamente —
+solo i giorni di Settembre; il 31 agosto appartiene al piano di Agosto.
+
+Nota: nella vista di **Agosto** il 31 aveva già la sua colonna e i suoi turni erano
+visibili — il problema era circoscritto alla vista del mese successivo, cioè proprio
+quella da cui Giacomo lavora la prima settimana di Settembre.
+
+### Fix (`src/app/manager/page.tsx`)
+
+1. **Colonne della tabella = giorni delle settimane del selettore**:
+   `giorniOrdinati = settimaneMese.flatMap(s => s.giorni)` invece di `getDays(anno, mese)`.
+   La tabella diventa una griglia di settimane Lun-Dom intere: Settembre 2026 = 35 colonne
+   da Lun 31 Ago a Dom 4 Ott, 5 colonne TOT, nessuna cella di padding (l'offset ora si
+   calcola dal primo giorno REALE della tabella, non dal 1° del mese, e vale 0).
+   I giorni dell'altro mese sono marcati (sfondo grigio-azzurro + sigla del mese sotto il
+   numero) ma **pienamente utilizzabili**: click cella, popup orari, turno spezzato,
+   ciclo assenze, bordo blu della settimana attiva.
+2. **Scritture con lo `schedule_id` risolto dalla DATA, non dal mese aperto**
+   (`scheduleIdPerScrittura`): `handleCellSelect` e `salvaTurnoSpezzato` usavano
+   `schedule.id` — un turno creato a mano sul 31 agosto dalla vista di Settembre sarebbe
+   finito sotto lo schedule SBAGLIATO. Se il mese di quel giorno non ha ancora un piano
+   viene creato al volo (stessa scelta già fatta da `generaSettimana`/`resetSettimana`) e
+   segue un `loadData()`. Gli aggiornamenti ottimistici ora vanno nella lista giusta
+   (`shifts` o `shiftsBordo`) tramite `patchShiftLocale`/`rimuoviShiftLocali`/
+   `aggiungiShiftLocale`.
+3. **`cycleAssenza`** cercava solo in `unavailabilities`: su un'assenza di un giorno di
+   bordo il click non faceva assolutamente nulla. Ora cerca anche in
+   `unavailabilitiesBordo` e aggiorna entrambe le liste.
+4. **`totSettimana`, `targetSettimana`, `haUsatoFerieSettimana`** ora leggono i giorni/le
+   assenze di tutta la settimana reale: il TOT della domenica 6 settembre comprende anche
+   il lunedì 31 agosto (prima lo escludeva silenziosamente, mostrando un totale più basso
+   del reale — e rosso senza motivo apparente).
+5. **PDF**: l'export mensile usa le stesse colonne della tabella (quello che si vede è
+   quello che si stampa) e, quando l'export attraversa due mesi, l'intestazione mostra
+   anche il numero del mese (`31/8`, `1/9`) — prima "31 Lun" e "1 Mar" erano ambigui.
+6. Tabella visibile anche quando i turni stanno solo nei giorni di bordo
+   (`shifts.length > 0 || shiftsBordo.length > 0`).
+
+### Fix collaterale (`src/lib/generator.ts`) — coerenza della settimana a cavallo
+
+`distribuisciCassiere22Settimana` usava `sort(() => Math.random() - 0.5)`. Una settimana
+a cavallo viene generata in **due chiamate distinte** a `generateShiftsMD` (una per
+`schedule_id`), quindi le due metà calcolavano distribuzioni mattina/pomeriggio
+**indipendenti** e la regola "3 mattina + 3 pomeriggio a settimana" poteva saltare
+esattamente sul confine di mese. Ora lo shuffle è un Fisher-Yates deterministico con seed
+= lunedì della settimana (`rngDaSeed`/`shuffleConSeed`): stessa settimana → stessa
+distribuzione in entrambe le metà, settimane diverse → coppie diverse come prima.
+**Testato** (funzione estratta e girata su 30 settimane simulate, 4 cassiere 22h):
+2 mattina + 2 pomeriggio ogni giorno ✅, 3+3 a settimana sabato incluso ✅, 26
+distribuzioni distinte su 30 settimane (varietà preservata) ✅, stesso seed → risultato
+identico in chiamate separate ✅.
+
+### Limiti noti, NON risolti qui
+
+- **Budget della settimana a cavallo calcolato in due metà**: `generateShiftsMDWeek`
+  chiama `generateShiftsMD` una volta per mese e filtra i giorni. Le parti deterministiche
+  (`distribuisciOre` per Carlo, alternanza Max/Romeo, sabato delle 22h, e ora la
+  distribuzione delle 22h) coincidono nelle due metà, ma i **pass di correzione**
+  (`correggiChiusura`, fasce 12-14 e 13-16, bilanciamento mattina/pomeriggio) girano
+  separatamente su ciascun mese e vedono solo i propri giorni: sul singolo giorno a
+  cavallo restano corretti (il conteggio è giornaliero), ma non c'è nessuna verifica di
+  budget sull'intera settimana reale. Il TOT in tabella ora lo rende visibile — se
+  Giacomo vede TOT rossi sulle settimane a cavallo, è questo, non un errore di
+  visualizzazione.
+- **Modal "indisponibilità" del dipendente** (calendario del modal) resta mese-scoped:
+  un'assenza sul 31 agosto va inserita dalla vista di Agosto. Dalla vista di Settembre si
+  può comunque cambiare il TIPO di un'assenza già esistente (click sulla cella).
+
+### Test
+
+- `npx tsc --noEmit`: pulito. `npm run build`: pulito, 16 pagine.
+- Traccia numerica sulle funzioni reali (prima/dopo): Settembre 2026 passa da 30 colonne
+  (31/08 assente, 1 cella di padding) a 35 colonne contigue Lun→Dom, 31/08 incluso,
+  padding 0, nessun giorno duplicato; verificato anche su Agosto 2026 (42 colonne,
+  27/07→06/09), Febbraio 2026 e Gennaio 2027 (cambio d'anno).
+- **Non verificato via click nel browser né su dati reali Supabase**: in questa sessione
+  non erano disponibili né le credenziali manager né le chiavi Supabase/Vercel (limite
+  ricorrente già documentato più volte in questo file), quindi non è stato possibile né
+  interrogare la tabella `shifts` in produzione né rifare lo scenario degli screenshot.
+  **Da confermare a mano**: aprire Settembre 2026 → la colonna "Lun 31 Ago" deve esserci
+  con i turni di Agosto già visibili; selezionare "Sett. 1: Lun 31 — Dom 6" → bordo blu su
+  tutti e 7 i giorni; "⚡ Genera settimana" (se il 31/08 ha già turni vengono PRESERVATI
+  per scelta di design: per rigenerarlo davvero serve prima "🗑️ Reset settimana").

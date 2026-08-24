@@ -92,6 +92,34 @@ const MIN_ORE_PER_CONTRATTO: Record<number, number> = { 22: 3, 28: 4, 30: 4, 35:
  * normalmente quel sabato. Applicata da applicaScontoFestivi() dopo la generazione. */
 const SCONTO_FESTIVO_PER_CONTRATTO: Record<number, number> = { 22: 3, 28: 4, 30: 5, 35: 5, 36: 6, 40: 6 }
 
+/** PRNG deterministico (mulberry32) inizializzato dall'hash di una stringa — usato per
+ * rendere riproducibile lo shuffle delle cassiere 22h a parità di settimana. */
+function rngDaSeed(seed: string): () => number {
+  let h = 1779033703 ^ seed.length
+  for (let i = 0; i < seed.length; i++) {
+    h = Math.imul(h ^ seed.charCodeAt(i), 3432918353)
+    h = (h << 13) | (h >>> 19)
+  }
+  let a = h >>> 0
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+/** Fisher-Yates con RNG iniettato — shuffle uniforme e riproducibile (il vecchio
+ * `sort(() => Math.random() - 0.5)` non era né l'uno né l'altro). */
+function shuffleConSeed<T>(arr: T[], rand: () => number): T[] {
+  const out = [...arr]
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    ;[out[i], out[j]] = [out[j], out[i]]
+  }
+  return out
+}
+
 /** Distribuisce ore intere su N giorni, rispettando min/max giornaliero. */
 function distribuisciOre(oreRimanenti: number, giorni: number, min: number, max: number): number[] {
   const result: number[] = []
@@ -261,8 +289,10 @@ async function getSabatoPrecedente(empId: string, monday: string): Promise<'matt
  * = mattina). */
 function distribuisciCassiere22Settimana(
   nomi: string[],
-  sabatoMattina: Record<string, boolean>
+  sabatoMattina: Record<string, boolean>,
+  seed: string
 ): Record<string, boolean[]> {
+  const rand = rngDaSeed(seed)
   const fabbisogno: Record<string, { mattina: number; pomeriggio: number }> = {}
   for (const nome of nomi) {
     fabbisogno[nome] = sabatoMattina[nome] ? { mattina: 2, pomeriggio: 3 } : { mattina: 3, pomeriggio: 2 }
@@ -284,7 +314,14 @@ function distribuisciCassiere22Settimana(
 
     const assegnati = new Set([...mattinaOggi, ...pomeriggioOggi])
     const liberi = nomi.filter(n => !assegnati.has(n))
-    const shuffled = [...liberi].sort(() => Math.random() - 0.5)
+    // Shuffle deterministico per settimana (seed = lunedì): le coppie continuano a
+    // variare da una settimana all'altra, ma la STESSA settimana produce sempre la stessa
+    // distribuzione. Serve per le settimane a cavallo tra due mesi (24/08/2026): quella
+    // settimana viene generata in due chiamate distinte a generateShiftsMD (una per
+    // schedule_id), e con Math.random le due metà calcolavano distribuzioni indipendenti
+    // — la regola "3 mattina + 3 pomeriggio a settimana" poteva così saltare a cavallo
+    // del confine di mese. Con lo stesso seed le due metà concordano sempre.
+    const shuffled = shuffleConSeed(liberi, rand)
 
     for (const n of shuffled) {
       if (mattinaOggi.length < 2) mattinaOggi.push(n)
@@ -395,7 +432,7 @@ export async function generateShiftsMD(params: GenerateParams): Promise<Omit<Shi
       sat[nome] = direzione === 'mattina'
     }
 
-    const lunVen = distribuisciCassiere22Settimana(nomiCassiere22, sat)
+    const lunVen = distribuisciCassiere22Settimana(nomiCassiere22, sat, monday)
     const risultato = { sat, lunVen }
     cassiere22Cache[monday] = risultato
     return risultato
