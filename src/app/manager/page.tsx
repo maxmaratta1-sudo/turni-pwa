@@ -184,12 +184,9 @@ export default function ManagerPage() {
   const [settimanaMezzogiorno, setSettimanaMezzogiorno] = useState(0)
   const [settimanaSelezionata, setSettimanaSelezionata] = useState<number | ''>('')
 
+  // Giorni del solo mese calendario — usati dove il contesto è davvero mensile
+  // (modal indisponibilità, stima ore di un festivo), NON per le colonne della tabella.
   const giorni = getDays(anno, mese)
-  // Regola assoluta: i giorni del mese vanno sempre in ordine cronologico 1→31,
-  // mai riordinati per settimana ISO (la colonna TOT si inserisce dopo ogni domenica,
-  // ma l'ordine dei giorni non cambia mai).
-  const giorniOrdinati = giorni
-  const offsetLunedi = getOffsetLunedi(anno, mese)
   // Settimane a cavallo (25/08/2026): ogni giorno porta anche lo schedule_id risolto
   // (null se lo schedule di quel mese non esiste ancora — verrà creato al bisogno da
   // generaSettimana/resetSettimana tramite ensureSchedule).
@@ -198,6 +195,21 @@ export default function ManagerPage() {
     giorni: s.giorni.map(g => ({ ...g, scheduleId: scheduleIdFor(g.mese, g.anno) })),
   }))
   const settimanaAttiva = settimanaSelezionata !== '' ? settimaneMese[settimanaSelezionata] : null
+  // Colonne della tabella (24/08/2026): TUTTI i giorni delle settimane elencate nel
+  // selettore, non più i soli giorni del mese calendario. Prima, aprendo Settembre, il
+  // 31 agosto NON aveva nessuna colonna: al suo posto si vedeva solo la cella grigia di
+  // allineamento (offsetLunedi), per costruzione sempre vuota e non cliccabile — da cui
+  // il sintomo "il 31 agosto resta vuoto anche dopo Genera settimana / Genera turni"
+  // (i turni venivano generati e salvati correttamente sotto lo schedule di Agosto, ma
+  // la tabella di Settembre non aveva dove mostrarli). Ora una settimana a cavallo ha
+  // davvero una colonna per ognuno dei suoi 7 giorni, in entrambi i mesi che la toccano.
+  // Regola assoluta invariata: ordine cronologico, mai riordinati per settimana ISO —
+  // la colonna TOT si inserisce dopo ogni domenica.
+  const giorniOrdinati = settimaneMese.flatMap(s => s.giorni)
+  // Le settimane estese iniziano sempre di lunedì, quindi in pratica l'offset è 0 e non
+  // viene renderizzata nessuna cella di padding — resta calcolato dal primo giorno reale
+  // della tabella (non dal 1° del mese) così l'allineamento regge comunque.
+  const offsetLunedi = giorniOrdinati.length > 0 ? getOffsetLunediData(giorniOrdinati[0].data) : 0
 
   useEffect(() => {
     const id = localStorage.getItem('turni_store_id')
@@ -349,6 +361,46 @@ export default function ManagerPage() {
     const next = meseAdiacente(mese, anno, 1)
     if (gMese === next.mese && gAnno === next.anno) return scheduleNext?.id ?? null
     return null
+  }
+
+  /** schedule_id da usare per SCRIVERE su un giorno qualsiasi della tabella — il mese
+   * aperto o un giorno di bordo di una settimana a cavallo (24/08/2026). Se quel mese non
+   * ha ancora un piano lo crea al volo (stessa scelta già fatta da generaSettimana/
+   * resetSettimana), invece di salvare il turno sotto lo schedule_id SBAGLIATO del mese
+   * aperto. Ritorna anche `creato`: se true il chiamante deve fare loadData(), perché
+   * schedule/schedulePrev/scheduleNext in state non conoscono ancora il piano nuovo. */
+  async function scheduleIdPerScrittura(data: string): Promise<{ id: string; creato: boolean }> {
+    const { mese: m, anno: a } = meseDiData(data)
+    const noto = scheduleIdFor(m, a)
+    if (noto) return { id: noto, creato: false }
+    const creato = await ensureSchedule(m, a)
+    return { id: creato.id, creato: true }
+  }
+
+  /** True se la data NON appartiene al mese aperto (giorno di bordo di una settimana a
+   * cavallo): i suoi turni/assenze vivono in shiftsBordo/unavailabilitiesBordo, non in
+   * shifts/unavailabilities. */
+  function isGiornoDiBordo(data: string): boolean {
+    const { mese: m, anno: a } = meseDiData(data)
+    return m !== mese || a !== anno
+  }
+
+  /** Aggiornamenti ottimistici applicati a ENTRAMBE le liste (mese corrente + giorni di
+   * bordo): gli id sono unici, quindi applicare il patch a tutte e due è sempre sicuro e
+   * evita di dover sapere in quale delle due sta la riga. */
+  function patchShiftLocale(id: string, patch: Partial<Shift>) {
+    setShifts(prev => prev.map(x => x.id === id ? { ...x, ...patch } : x))
+    setShiftsBordo(prev => prev.map(x => x.id === id ? { ...x, ...patch } : x))
+  }
+
+  function rimuoviShiftLocali(ids: string[]) {
+    setShifts(prev => prev.filter(x => !ids.includes(x.id)))
+    setShiftsBordo(prev => prev.filter(x => !ids.includes(x.id)))
+  }
+
+  function aggiungiShiftLocale(shift: Shift) {
+    if (isGiornoDiBordo(shift.data)) setShiftsBordo(prev => [...prev, shift])
+    else setShifts(prev => [...prev, shift])
   }
 
   async function generateTurni() {
@@ -604,7 +656,10 @@ Puoi:
     copyTimerRef.current = setTimeout(() => setCopiedToken(null), 2000)
   }
 
-  async function exportPDF(giorniDaEsportare: typeof giorni = giorni, subtitle?: string) {
+  async function exportPDF(
+    giorniDaEsportare: { data: string; num: number; giorno: string; domenica: boolean }[] = giorniOrdinati,
+    subtitle?: string,
+  ) {
     const { jsPDF } = await import('jspdf')
     const { autoTable } = await import('jspdf-autotable')
     const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
@@ -613,9 +668,12 @@ Puoi:
     doc.setFontSize(14)
     doc.text(`Turni ${nomeMese} ${anno}${subtitle ? ` — ${subtitle}` : ''} — ${storeNome || 'Negozio'}`, 14, 14)
 
+    // Se l'export attraversa due mesi (settimana/mese a cavallo) l'intestazione mostra
+    // anche il numero del mese, altrimenti "31 Lun" e "1 Mar" sarebbero ambigui.
+    const multiMese = new Set(giorniDaEsportare.map(g => g.data.slice(0, 7))).size > 1
     const headRow: string[] = ['Dipendente']
     giorniDaEsportare.forEach(g => {
-      headRow.push(`${g.num}\n${g.giorno}`)
+      headRow.push(`${g.num}${multiMese ? `/${Number(g.data.slice(5, 7))}` : ''}\n${g.giorno}`)
       if (g.domenica) headRow.push('TOT')
     })
     const head = [headRow]
@@ -731,13 +789,17 @@ Puoi:
   }
 
   async function cycleAssenza(empId: string, data: string) {
-    const u = unavailabilities.find(x => x.employee_id === empId && x.data === data)
+    // Cerca anche tra le assenze dei giorni di bordo (24/08/2026): un'assenza del 31 agosto
+    // vive in unavailabilitiesBordo quando è aperta la vista di Settembre — prima il click
+    // sulla cella non faceva semplicemente nulla.
+    const u = [...unavailabilities, ...unavailabilitiesBordo].find(x => x.employee_id === empId && x.data === data)
     if (!u) return
     const current = getAssenzaCode(empId, data)
     const idx = ASSENZA_CYCLE.indexOf(current as typeof ASSENZA_CYCLE[number])
     const next = ASSENZA_CYCLE[(idx + 1) % ASSENZA_CYCLE.length]
     await supabase.from('unavailabilities').update({ tipo_assenza: next }).eq('id', u.id)
     setUnavailabilities(prev => prev.map(x => x.id === u.id ? { ...x, tipo_assenza: next } : x))
+    setUnavailabilitiesBordo(prev => prev.map(x => x.id === u.id ? { ...x, tipo_assenza: next } : x))
   }
 
   // ── Colonna TOT settimanale ──────────────────────────────────────────────
@@ -764,7 +826,10 @@ Puoi:
     const sunday = new Date(sundayData + 'T00:00:00')
     const start = new Date(sunday)
     start.setDate(start.getDate() - 6)
-    return giorni
+    // giorniOrdinati (non `giorni`): per una settimana a cavallo il TOT deve includere
+    // anche i giorni dell'altro mese — es. il TOT della domenica 6 settembre comprende
+    // il lunedì 31 agosto, che nel mese calendario di Settembre non esiste (24/08/2026).
+    return giorniOrdinati
       .filter(g => {
         const d = new Date(g.data + 'T00:00:00')
         return d >= start && d <= sunday
@@ -805,7 +870,9 @@ Puoi:
     const start = new Date(sunday)
     start.setDate(start.getDate() - 6)
     const isCarlo = emp.nome.trim() === 'Carlo'
-    const festiviRilevanti = giorni.filter(g => {
+    // giorniOrdinati: un festivo che cade nel giorno "di bordo" di una settimana a
+    // cavallo deve scalare il target anche visto dall'altro mese (24/08/2026).
+    const festiviRilevanti = giorniOrdinati.filter(g => {
       const d = new Date(g.data + 'T00:00:00')
       if (d < start || d > sunday) return false
       if (d.getDay() === 0) return false
@@ -823,7 +890,7 @@ Puoi:
     const sunday = new Date(sundayData + 'T00:00:00')
     const start = new Date(sunday)
     start.setDate(start.getDate() - 6)
-    return unavailabilities.some(u => {
+    return [...unavailabilities, ...unavailabilitiesBordo].some(u => {
       if (u.employee_id !== empId || u.tipo_assenza !== 'F') return false
       const d = new Date(u.data + 'T00:00:00')
       return d >= start && d <= sunday
@@ -831,7 +898,7 @@ Puoi:
   }
 
   function totColor(tot: number, target: number): string {
-    if (shifts.length === 0) return 'bg-gray-100 text-gray-400' // settimana non ancora generata
+    if (shifts.length === 0 && shiftsBordo.length === 0) return 'bg-gray-100 text-gray-400' // settimana non ancora generata
     const diff = Math.abs(tot - target)
     return diff <= 1 ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
   }
@@ -959,7 +1026,6 @@ Puoi:
   }
 
   async function handleCellSelect(empId: string, data: string, orario: string) {
-    if (!schedule) return
     const emp = employees.find(e => e.id === empId)
     const { tipo, ora_inizio, ora_fine } = parseOrarioSelezionato(orario, emp)
     const shiftsGiorno = getShiftsForDay(empId, data)
@@ -969,17 +1035,21 @@ Puoi:
     // torna a un turno singolo — rimuove il secondo blocco (sequenza 2), 8 agosto 2026.
     if (shiftsGiorno.length > 1) {
       const extra = shiftsGiorno.slice(1)
-      setShifts(prev => prev.filter(s => !extra.some(e => e.id === s.id)))
+      rimuoviShiftLocali(extra.map(s => s.id))
       await supabase.from('shifts').delete().in('id', extra.map(s => s.id))
     }
 
     if (existing) {
-      setShifts(prev => prev.map(s => s.id === existing.id ? { ...s, tipo, ora_inizio: ora_inizio ?? undefined, ora_fine: ora_fine ?? undefined, sequenza: 1 } : s))
+      patchShiftLocale(existing.id, { tipo, ora_inizio: ora_inizio ?? undefined, ora_fine: ora_fine ?? undefined, sequenza: 1 })
       await supabase.from('shifts').update({ tipo, ora_inizio, ora_fine, sequenza: 1 }).eq('id', existing.id)
     } else {
+      // Settimane a cavallo (24/08/2026): lo schedule_id si risolve dalla DATA del giorno
+      // cliccato — un turno del 31 agosto creato dalla vista di Settembre deve finire
+      // sotto lo schedule di Agosto, non sotto quello aperto.
+      const { id: schedId, creato } = await scheduleIdPerScrittura(data)
       const optimistic: Shift = {
         id: `temp-${empId}-${data}`,
-        schedule_id: schedule.id,
+        schedule_id: schedId,
         employee_id: empId,
         data,
         tipo,
@@ -987,13 +1057,17 @@ Puoi:
         ora_fine: ora_fine ?? undefined,
         sequenza: 1,
       }
-      setShifts(prev => [...prev, optimistic])
+      aggiungiShiftLocale(optimistic)
       const { data: newShift } = await supabase.from('shifts')
-        .insert({ schedule_id: schedule.id, employee_id: empId, data, tipo, ora_inizio, ora_fine, sequenza: 1 })
+        .insert({ schedule_id: schedId, employee_id: empId, data, tipo, ora_inizio, ora_fine, sequenza: 1 })
         .select().single()
       if (newShift) {
-        setShifts(prev => prev.map(s => s.id === `temp-${empId}-${data}` ? newShift : s))
+        // Sostituisce la riga ottimistica temporanea con quella reale appena inserita.
+        rimuoviShiftLocali([`temp-${empId}-${data}`])
+        aggiungiShiftLocale(newShift)
       }
+      // Piano del mese adiacente appena creato: ricarica tutto (schedule + giorni di bordo).
+      if (creato) await loadData()
     }
     setPopupCell(null)
   }
@@ -1004,22 +1078,22 @@ Puoi:
    * righe distinte (sequenza 1/2) sostituiscono qualsiasi turno singolo esistente quel
    * giorno. */
   async function salvaTurnoSpezzato(empId: string, data: string, fineMattina: string, inizioPomeriggio: string) {
-    if (!schedule) return
     setSavingSpezzato(true)
     try {
+      // Come handleCellSelect: schedule_id dalla data, mai dal mese aperto (24/08/2026).
+      const { id: schedId, creato } = await scheduleIdPerScrittura(data)
       const esistenti = getShiftsForDay(empId, data)
       if (esistenti.length > 0) {
         await supabase.from('shifts').delete().in('id', esistenti.map(s => s.id))
       }
       const righe = [
-        { schedule_id: schedule.id, employee_id: empId, data, tipo: 'spezzato_mattina' as TurnoTipo, ora_inizio: '08:00', ora_fine: fineMattina, sequenza: 1 },
-        { schedule_id: schedule.id, employee_id: empId, data, tipo: 'spezzato_pomeriggio' as TurnoTipo, ora_inizio: inizioPomeriggio, ora_fine: '20:00', sequenza: 2 },
+        { schedule_id: schedId, employee_id: empId, data, tipo: 'spezzato_mattina' as TurnoTipo, ora_inizio: '08:00', ora_fine: fineMattina, sequenza: 1 },
+        { schedule_id: schedId, employee_id: empId, data, tipo: 'spezzato_pomeriggio' as TurnoTipo, ora_inizio: inizioPomeriggio, ora_fine: '20:00', sequenza: 2 },
       ]
       const { data: nuovi } = await supabase.from('shifts').insert(righe).select()
-      setShifts(prev => {
-        const senzaEsistenti = prev.filter(s => !esistenti.some(e => e.id === s.id))
-        return nuovi ? [...senzaEsistenti, ...nuovi] : senzaEsistenti
-      })
+      rimuoviShiftLocali(esistenti.map(s => s.id))
+      for (const riga of nuovi || []) aggiungiShiftLocale(riga)
+      if (creato) await loadData()
     } finally {
       setSavingSpezzato(false)
       setModalSpezzato(null)
@@ -1267,7 +1341,7 @@ Puoi:
         ))}
 
         {/* Tabella turni */}
-        {shifts.length > 0 && (
+        {(shifts.length > 0 || shiftsBordo.length > 0) && (
           <div className="bg-white rounded-xl shadow-sm overflow-x-auto mb-6">
             <table className="w-full text-sm" style={{ minWidth: '1800px' }}>
               <thead>
@@ -1283,11 +1357,15 @@ Puoi:
                   {giorniOrdinati.map(g => {
                     const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
                     const nomeFestivo = festiviMap[g.data]
+                    // Giorno di un mese diverso da quello aperto (settimana a cavallo):
+                    // resta pienamente utilizzabile, ma è marcato per non confondersi.
+                    const altroMese = g.mese !== mese || g.anno !== anno
                     return (
                       <Fragment key={g.data}>
-                        <th className={`p-2 text-center font-medium min-w-14 ${g.domenica || nomeFestivo ? 'bg-red-50 text-red-400' : 'text-gray-600'} ${inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''}`}>
+                        <th className={`p-2 text-center font-medium min-w-14 ${g.domenica || nomeFestivo ? 'bg-red-50 text-red-400' : altroMese ? 'bg-slate-100 text-gray-500' : 'text-gray-600'} ${inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''}`}>
                           <div className="text-xs">{g.giorno}</div>
                           <div className="text-xs text-gray-400">{g.num}</div>
+                          {altroMese && <div className="text-[10px] text-indigo-500">{MESI[g.mese - 1].slice(0, 3)}</div>}
                           {nomeFestivo && <div className="text-xs text-purple-500">{nomeFestivo}</div>}
                         </th>
                         {g.domenica && (
@@ -1320,7 +1398,8 @@ Puoi:
                       const isPermesso = hasUnavailability(emp.id, g.data)
                       const nomeFestivo = festiviMap[g.data]
                       const domenicaBloccata = !!nomeFestivo
-                      const cellBg = g.domenica || nomeFestivo ? 'bg-purple-50' : ''
+                      const altroMese = g.mese !== mese || g.anno !== anno
+                      const cellBg = g.domenica || nomeFestivo ? 'bg-purple-50' : altroMese ? 'bg-slate-50' : ''
                       const inSettimanaAttiva = !!settimanaAttiva && settimanaAttiva.giorni.some(sg => sg.data === g.data)
                       const bordoSettimana = inSettimanaAttiva ? 'border-t-2 border-b-2 border-blue-500' : ''
 
@@ -1852,12 +1931,21 @@ function getDays(anno: number, mese: number) {
   return days
 }
 
-/** Offset del primo giorno del mese rispetto a Lunedì (0=Lun...6=Dom) — usato per
- * allineare la tabella come un calendario iPhone: celle vuote prima del giorno 1
- * se il mese non inizia di Lunedì. */
-function getOffsetLunedi(anno: number, mese: number): number {
-  const primoGiorno = new Date(anno, mese - 1, 1).getDay()
-  return primoGiorno === 0 ? 6 : primoGiorno - 1
+/** Offset di una data rispetto a Lunedì (0=Lun...6=Dom) — usato per allineare la tabella
+ * come un calendario iPhone: celle vuote prima della prima colonna se questa non cade di
+ * Lunedì. Calcolato sul primo giorno REALE della tabella (che con le settimane estese può
+ * appartenere al mese precedente), non sul 1° del mese. */
+function getOffsetLunediData(data: string): number {
+  const dow = new Date(data + 'T00:00:00').getDay()
+  return dow === 0 ? 6 : dow - 1
+}
+
+/** {mese, anno} di una data 'YYYY-MM-DD' — una colonna della tabella può appartenere al
+ * mese precedente/successivo (settimane a cavallo), quindi il mese va sempre dedotto
+ * dalla data, mai assunto uguale a quello aperto nel selettore. */
+function meseDiData(data: string): { mese: number; anno: number } {
+  const [a, m] = data.split('-').map(Number)
+  return { mese: m, anno: a }
 }
 
 /** Mese/anno a distanza di `delta` mesi (±1) da (mese, anno) — gestisce il cambio anno. */
