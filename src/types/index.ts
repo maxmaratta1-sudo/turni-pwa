@@ -1,7 +1,7 @@
 export type TurnoTipo =
   | 'mattina' | 'pomeriggio' | 'full' | 'riposo' | 'domenica_lungo' | 'domenica_corto'
   | 'yuri_full' | 'yuri_pomeriggio' | 'mattina_corta' | 'pomeriggio_corto'
-  | 'turno_breve_11_14' | 'turno_breve_12_15' | 'turno_breve_13_16' | 'turno_breve_17_20'
+  | 'turno_breve_11_14' | 'turno_breve_12_14' | 'turno_breve_12_15' | 'turno_breve_13_16' | 'turno_breve_17_20'
   // Turno spezzato manuale (8 agosto 2026) — SOLO manager/page.tsx, mai generator.ts né
   // Maia (vedi CLAUDE.md). Mattina sempre 08:00-fine variabile, pomeriggio sempre
   // inizio variabile-20:00 — due righe `shifts` distinte (sequenza 1/2) per lo stesso
@@ -87,7 +87,7 @@ export const ORE_TURNO_MD: Record<TurnoTipo, number> = {
   yuri_pomeriggio: 3,  // 13:00-16:00 (Mar/Gio, mattina in salumeria)
   mattina_corta: 5,    // 08:00-13:00 (Max)
   pomeriggio_corto: 5, // 14:00-19:00 (Max)
-  turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
+  turno_breve_11_14: 3, turno_breve_12_14: 2, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
   // Turno spezzato — ore sempre calcolate dai campi reali ora_inizio/ora_fine (mai fissi,
   // variano per definizione), questi valori sono solo placeholder di fallback mai usati
   // in pratica (vedi getOreDisplay in manager/page.tsx, priorità sempre a ora_inizio/fine).
@@ -106,6 +106,7 @@ export const ORARI_TURNO_MD: Record<TurnoTipo, { inizio: string; fine: string } 
   mattina_corta:    { inizio: '08:00', fine: '13:00' },
   pomeriggio_corto: { inizio: '14:00', fine: '19:00' },
   turno_breve_11_14: { inizio: '11:00', fine: '14:00' },
+  turno_breve_12_14: { inizio: '12:00', fine: '14:00' },
   turno_breve_12_15: { inizio: '12:00', fine: '15:00' },
   turno_breve_13_16: { inizio: '13:00', fine: '16:00' },
   turno_breve_17_20: { inizio: '17:00', fine: '20:00' },

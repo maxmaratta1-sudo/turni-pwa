@@ -9,6 +9,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { supabaseAdmin } from '@/lib/supabase'
 import { ORARI_TURNO_MD, TurnoTipo } from '@/types'
 import { oreFromOrario, ORE_28H_FERIALI, calcolaTurnoRidotto, calcolaTurnoStandardGiorno } from '@/lib/generator'
+import { getStoricoDomeniche } from '@/lib/storicoDomeniche'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -23,8 +24,8 @@ const tools: Anthropic.Tool[] = [
         data: { type: 'string', description: 'Data in formato YYYY-MM-DD' },
         tipo: {
           type: 'string',
-          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto', 'turno_breve_11_14', 'turno_breve_12_15', 'turno_breve_13_16', 'turno_breve_17_20'],
-          description: 'Tipo di turno. yuri_full=08-16 (Lun/Mer/Ven Yuri), yuri_pomeriggio=13-16 (Mar/Gio Yuri), mattina_corta=08-13 e pomeriggio_corto=14-19 (Max, 5h). turno_breve_* = turni brevi eccezionali da 3h (11-14, 12-15, 13-16, 17-20), disponibili per chiunque su richiesta esplicita di Giacomo.',
+          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto', 'turno_breve_11_14', 'turno_breve_12_14', 'turno_breve_12_15', 'turno_breve_13_16', 'turno_breve_17_20'],
+          description: 'Tipo di turno. yuri_full=08-16 (Lun/Mer/Ven Yuri), yuri_pomeriggio=13-16 (Mar/Gio Yuri), mattina_corta=08-13 e pomeriggio_corto=14-19 (Max, 5h). turno_breve_* = turni brevi eccezionali (11-14, 12-14, 12-15, 13-16, 17-20 — tutti 3h tranne 12-14 che è 2h), disponibili per chiunque su richiesta esplicita di Giacomo.',
         },
         recupero_domenicale: {
           type: 'boolean',
@@ -49,7 +50,7 @@ const tools: Anthropic.Tool[] = [
         data_fine: { type: 'string', description: 'Data fine YYYY-MM-DD' },
         tipo: {
           type: 'string',
-          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto', 'turno_breve_11_14', 'turno_breve_12_15', 'turno_breve_13_16', 'turno_breve_17_20'],
+          enum: ['mattina', 'pomeriggio', 'full', 'riposo', 'domenica_lungo', 'domenica_corto', 'yuri_full', 'yuri_pomeriggio', 'mattina_corta', 'pomeriggio_corto', 'turno_breve_11_14', 'turno_breve_12_14', 'turno_breve_12_15', 'turno_breve_13_16', 'turno_breve_17_20'],
         },
         ore: {
           type: 'number',
@@ -157,6 +158,16 @@ const tools: Anthropic.Tool[] = [
         nome_mattina: { type: 'string', enum: ['Romeo', 'Max'], description: 'Chi fa mattina da questa settimana in poi' },
       },
       required: ['settimana_inizio', 'nome_mattina'],
+    },
+  },
+  {
+    name: 'get_storico_domeniche',
+    description: 'Recupera quante domeniche (domenica_lungo/domenica_corto) ha lavorato ciascun dipendente negli ultimi 2 mesi, ordinato dal meno domeniche fatte al più. Usa questo tool SEMPRE quando Giacomo chiede chi dovrebbe fare/tocca la prossima domenica, o vuole sapere lo storico domeniche di qualcuno — rispondi sempre sui dati reali di questo tool, mai a intuito.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        giorni: { type: 'number', description: 'Finestra in giorni da considerare (default 60 = 2 mesi). Cambiala solo se Giacomo chiede esplicitamente un periodo diverso.' },
+      },
     },
   },
 ]
@@ -900,6 +911,18 @@ async function executeTool(toolName: string, input: any, ctx: ToolCtx): Promise<
     return `Configurazione aggiornata (ultima modifica ${data.updated_at}):\n${JSON.stringify(data.config, null, 2)}`
   }
 
+  if (toolName === 'get_storico_domeniche') {
+    try {
+      const righe = await getStoricoDomeniche(ctx.storeId, typeof input.giorni === 'number' ? input.giorni : undefined)
+      if (righe.length === 0) return 'Nessun dipendente attivo trovato.'
+      return righe
+        .map(r => `${r.nome}: ${r.domenicheLavorate} domenic${r.domenicheLavorate === 1 ? 'a' : 'he'} — ultima ${r.ultimaDomenica ?? 'mai'}`)
+        .join('\n')
+    } catch (e: any) {
+      return `Errore lettura storico domeniche: ${e?.message ?? String(e)}`
+    }
+  }
+
   return `Errore: tool "${toolName}" non riconosciuto.`
 }
 
@@ -1015,7 +1038,7 @@ Se il contesto dice "Max mattina" → Romeo DEVE fare pomeriggio, senza eccezion
 TURNI BREVI (casi eccezionali) — vedi anche "regole_generali.turni_brevi_eccezionali" in configurazione:
 Quando Giacomo dice "metti [nome] turno breve [orario]" o indica direttamente una fascia oraria di 3h
 (es. "11-14", "dalle 17 alle 20") → usa il tipo turno_breve corrispondente, non "mattina"/"pomeriggio".
-Es: "metti Angelica 11-14 giovedì" → tipo: turno_breve_11_14.
+Es: "metti Angelica 11-14 giovedì" → tipo: turno_breve_11_14. "metti Marilena 12-14 lunedì" → tipo: turno_breve_12_14 (2h, non 3h come gli altri turno_breve).
 Eccezione: 13-16 per Yuri resta sempre yuri_pomeriggio (il suo turno fisso), MAI turno_breve_13_16 — quella distinzione vale solo per lui.
 
 REGOLE DOMENICA (gestite SOLO da Giacomo — Maia non le applica automaticamente — vedi "regole_generali.domenica" in configurazione per orari/esclusi):

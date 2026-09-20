@@ -29,7 +29,7 @@ function sortEmployees(emps: Employee[]): Employee[] {
 const TURNO_LABEL: Record<string, string> = {
   mattina: 'M', pomeriggio: 'Pm', full: 'F', riposo: '—', domenica_lungo: 'DL', domenica_corto: 'DC',
   yuri_full: 'YF', yuri_pomeriggio: 'Y', mattina_corta: 'M5', pomeriggio_corto: 'P5',
-  turno_breve_11_14: '11/14', turno_breve_12_15: '12/15', turno_breve_13_16: '13/16', turno_breve_17_20: '17/20',
+  turno_breve_11_14: '11/14', turno_breve_12_14: '12/14', turno_breve_12_15: '12/15', turno_breve_13_16: '13/16', turno_breve_17_20: '17/20',
   spezzato_mattina: 'Sp-M', spezzato_pomeriggio: 'Sp-P',
 }
 const TURNO_COLOR: Record<string, string> = {
@@ -45,6 +45,7 @@ const TURNO_COLOR: Record<string, string> = {
   riposo: 'bg-gray-100 text-gray-400',
   // Stesso colore rosa per tutti i turni brevi — riconoscibili a colpo d'occhio come eccezione.
   turno_breve_11_14: 'bg-pink-100 text-pink-800',
+  turno_breve_12_14: 'bg-pink-100 text-pink-800',
   turno_breve_12_15: 'bg-pink-100 text-pink-800',
   turno_breve_13_16: 'bg-pink-100 text-pink-800',
   turno_breve_17_20: 'bg-pink-100 text-pink-800',
@@ -59,7 +60,7 @@ const ORE_PER_TURNO: Record<string, number> = {
   yuri_full: 6, yuri_pomeriggio: 3,
   domenica_lungo: 5, domenica_corto: 3,
   riposo: 0,
-  turno_breve_11_14: 3, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
+  turno_breve_11_14: 3, turno_breve_12_14: 2, turno_breve_12_15: 3, turno_breve_13_16: 3, turno_breve_17_20: 3,
   // Fallback mai realmente usato — il turno spezzato ha sempre ora_inizio/ora_fine reali,
   // getOreDisplay le usa sempre in priorità (vedi sotto).
   spezzato_mattina: 0, spezzato_pomeriggio: 0,
@@ -93,7 +94,7 @@ const TURNO_ORARIO_MD: Record<string, string> = {
   yuri_full: '8/16', yuri_pomeriggio: '13/16',
   domenica_lungo: '8/13', domenica_corto: '10/13',
   riposo: '—',
-  turno_breve_11_14: '11/14', turno_breve_12_15: '12/15', turno_breve_13_16: '13/16', turno_breve_17_20: '17/20',
+  turno_breve_11_14: '11/14', turno_breve_12_14: '12/14', turno_breve_12_15: '12/15', turno_breve_13_16: '13/16', turno_breve_17_20: '17/20',
 }
 
 function formatOraShort(time?: string | null): string {
@@ -182,6 +183,24 @@ export default function ManagerPage() {
   const [settimanaChiusure, setSettimanaChiusure] = useState(0)
   const [showMezzogiorno, setShowMezzogiorno] = useState(false)
   const [settimanaMezzogiorno, setSettimanaMezzogiorno] = useState(0)
+  // FEATURE 2 (20 settembre 2026, richiesta Giacomo) — storico domeniche lavorate per
+  // dipendente, ultimi 2+ mesi. Nessuna navigazione settimana (a differenza di Chiusure/
+  // Mezzogiorno): è un riepilogo su finestra fissa, non per-settimana.
+  const [showStoricoDomeniche, setShowStoricoDomeniche] = useState(false)
+  const [storicoDomeniche, setStoricoDomeniche] = useState<{ employeeId: string; nome: string; domenicheLavorate: number; ultimaDomenica: string | null }[] | null>(null)
+  const [loadingStoricoDomeniche, setLoadingStoricoDomeniche] = useState(false)
+
+  async function apriStoricoDomeniche() {
+    setShowStoricoDomeniche(true)
+    setLoadingStoricoDomeniche(true)
+    try {
+      const res = await fetch(`/api/shifts/storico-domeniche?store_id=${storeId}&giorni=60`)
+      const data = await res.json()
+      setStoricoDomeniche(data.righe ?? [])
+    } finally {
+      setLoadingStoricoDomeniche(false)
+    }
+  }
   const [settimanaSelezionata, setSettimanaSelezionata] = useState<number | ''>('')
 
   // Giorni del solo mese calendario — usati dove il contesto è davvero mensile
@@ -751,6 +770,7 @@ Puoi:
             '13/16': [191, 219, 254],  // yuri_pomeriggio
             '14/19': [254, 237, 213],  // pomeriggio_corto (Max) — stesso colore di pomeriggio
             '11/14': [252, 231, 243],  // turno_breve_11_14
+            '12/14': [252, 231, 243],  // turno_breve_12_14
             '12/15': [252, 231, 243],  // turno_breve_12_15
             '17/20': [252, 231, 243],  // turno_breve_17_20
           }
@@ -985,7 +1005,7 @@ Puoi:
     '09/12', '09/13', '09/14', '09/17',
     '10/13', '10/14', '10/15', '10/16', '10/18',
     '11/14', '11/15', '11/16', '11/17',
-    '12/15', '12/16',
+    '12/14', '12/15', '12/16',
     '13/16', '13/17',
     '14/19', '14/20',
     '15/20',
@@ -1018,6 +1038,7 @@ Puoi:
     // un turno breve eccezionale (turno_breve_13_16), stessa fascia oraria ma significato diverso.
     if (iniN === 13 && finN === 16) return { tipo: emp?.nome === 'Yuri' ? 'yuri_pomeriggio' : 'turno_breve_13_16', ora_inizio, ora_fine }
     if (iniN === 11 && finN === 14) return { tipo: 'turno_breve_11_14', ora_inizio, ora_fine }
+    if (iniN === 12 && finN === 14) return { tipo: 'turno_breve_12_14', ora_inizio, ora_fine }
     if (iniN === 12 && finN === 15) return { tipo: 'turno_breve_12_15', ora_inizio, ora_fine }
     if (iniN === 17 && finN === 20) return { tipo: 'turno_breve_17_20', ora_inizio, ora_fine }
     if (iniN === 8 && finN === 20) return { tipo: 'full', ora_inizio, ora_fine }
@@ -1214,6 +1235,10 @@ Puoi:
                   🕐 Mezzogiorno
                 </button>
               )}
+              <button onClick={apriStoricoDomeniche}
+                className="bg-slate-700 text-white px-4 py-2 rounded hover:bg-slate-800 flex items-center gap-2">
+                📅 Storico Domeniche
+              </button>
               {shifts.length > 0 && (
                 <button onClick={resetMese} className="bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded hover:bg-red-100">
                   🗑️ Reset mese
@@ -1502,7 +1527,7 @@ Puoi:
             </table>
             <div className="p-3 text-xs text-gray-400 flex gap-4 flex-wrap">
               {/* Le celle mostrano già gli orari — nessuna voce turno in legenda, solo assenze. */}
-              <span className="text-pink-700">11/14, 12/15, 13/16, 17/20 = Turno breve (3h)</span>
+              <span className="text-pink-700">11/14, 12/14 (2h), 12/15, 13/16, 17/20 = Turno breve</span>
               <span className="text-fuchsia-700">✂️ = Turno spezzato (mattina 08:00-x + pomeriggio x-20:00)</span>
               <span><strong className="text-yellow-700">F</strong><span className="text-yellow-700"> = Ferie</span></span>
               <span><strong className="text-yellow-700">P</strong><span className="text-yellow-700"> = Permesso</span></span>
@@ -1712,6 +1737,56 @@ Puoi:
             </>
           )
         })()}
+
+        {/* Pannello laterale "Storico Domeniche" (FEATURE 2, 20 settembre 2026) — quante
+            domeniche (domenica_lungo/domenica_corto) ha lavorato ogni dipendente negli
+            ultimi 60 giorni, ordinato crescente (chi ne ha fatte meno in cima — "tocca a
+            lui/lei"). Nessuna navigazione settimana: è un riepilogo su finestra fissa. */}
+        {showStoricoDomeniche && (
+          <>
+            <div className="fixed inset-0 bg-black/20 z-40" onClick={() => setShowStoricoDomeniche(false)} />
+            <div className="fixed top-0 right-0 h-full bg-white shadow-2xl z-50 flex flex-col" style={{ width: 360 }}>
+              <div className="flex items-center justify-between px-4 py-3 border-b bg-slate-700">
+                <h3 className="text-white font-semibold text-sm">📅 Storico Domeniche — ultimi 2 mesi</h3>
+                <button onClick={() => setShowStoricoDomeniche(false)} className="text-white/80 hover:text-white text-lg">✕</button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto">
+                {loadingStoricoDomeniche ? (
+                  <p className="text-sm text-gray-400 p-4">Caricamento…</p>
+                ) : !storicoDomeniche || storicoDomeniche.length === 0 ? (
+                  <p className="text-sm text-gray-400 p-4">Nessun dato disponibile.</p>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 border-b sticky top-0">
+                      <tr>
+                        <th className="text-left px-4 py-2 font-medium text-gray-600">Dipendente</th>
+                        <th className="text-center px-2 py-2 font-medium text-gray-600">Domeniche</th>
+                        <th className="text-right px-4 py-2 font-medium text-gray-600">Ultima</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {storicoDomeniche.map((r, i) => (
+                        <tr key={r.employeeId} className={`border-b last:border-0 ${i === 0 ? 'bg-green-50' : ''}`}>
+                          <td className="px-4 py-2 text-gray-800">{r.nome}</td>
+                          <td className="px-2 py-2 text-center font-semibold text-gray-800">{r.domenicheLavorate}</td>
+                          <td className="px-4 py-2 text-right text-gray-500 text-xs">
+                            {r.ultimaDomenica
+                              ? (() => { const d = new Date(r.ultimaDomenica + 'T00:00:00'); return `${d.getDate()} ${MESI[d.getMonth()].slice(0, 3)}` })()
+                              : 'mai'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+              <div className="px-4 py-2 border-t bg-gray-50 text-xs text-gray-400">
+                Ordinato per meno domeniche lavorate — la prima riga è chi "tocca" di più.
+              </div>
+            </div>
+          </>
+        )}
 
         {/* Pannello permessi mensili */}
         {Object.keys(unavByEmployee).length > 0 && (
