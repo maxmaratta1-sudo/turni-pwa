@@ -24,10 +24,21 @@ export interface StoricoDomenicaRow {
   ultimaDomenica: string | null // 'YYYY-MM-DD' o null se mai lavorata nella finestra
 }
 
-/** Conta le domeniche lavorate (domenica_lungo/domenica_corto) per ogni dipendente
- * attivo dello store, negli ultimi `giorni` (default 60 = 2 mesi). Include SEMPRE tutti
- * i dipendenti attivi anche a 0 domeniche — è proprio chi ha 0 (o meno) a dover essere
- * il più visibile per la prossima assegnazione. Ordinato per conteggio crescente. */
+/** Conta le domeniche lavorate per ogni dipendente attivo dello store, negli ultimi
+ * `giorni` (default 60 = 2 mesi). Include SEMPRE tutti i dipendenti attivi anche a 0
+ * domeniche — è proprio chi ha 0 (o meno) a dover essere il più visibile per la
+ * prossima assegnazione. Ordinato per conteggio crescente.
+ *
+ * 🐛 Fix (24 settembre 2026, segnalato da Giacomo — Yuri lavorato una domenica ma
+ * assente dallo storico) — prima filtrava `tipo IN ('domenica_lungo','domenica_corto')`,
+ * escludendo qualsiasi turno domenicale assegnato con un tipo diverso (es. "mattina" con
+ * orario custom scelto manualmente dal menu a cascata — esattamente il caso reale di
+ * Yuri, domenica 13/09/2026, tipo "mattina" 08:00-13:00). Ora conta come "domenica
+ * lavorata" qualunque shift NON di riposo la cui `data` cade di domenica (calcolato dalla
+ * data reale, non dal campo tipo) — copre sia le assegnazioni standard sia quelle
+ * manuali con orari custom. Verificato che questo non fa comparire Gilda/Tony (esclusi
+ * assoluti dalla domenica): ogni loro riga di domenica in produzione è `tipo: "riposo"`,
+ * quindi restano correttamente a 0 anche col fix. */
 export async function getStoricoDomeniche(storeId: string, giorni: number = 60): Promise<StoricoDomenicaRow[]> {
   const supabase = noStoreClient()
   const oggi = new Date()
@@ -49,16 +60,21 @@ export async function getStoricoDomeniche(storeId: string, giorni: number = 60):
     return (employees ?? []).map(e => ({ employeeId: e.id, nome: e.nome, domenicheLavorate: 0, ultimaDomenica: null }))
   }
 
+  // Nessun filtro sul campo `tipo` qui — Postgrest non può filtrare per giorno della
+  // settimana di una colonna date, quindi si prende tutto il range e si filtra in JS
+  // sotto (stesso principio già usato per il debug che ha trovato questo bug).
   const { data: shifts, error: shiftErr } = await supabase
     .from('shifts')
-    .select('employee_id, data')
+    .select('employee_id, data, tipo')
     .in('schedule_id', scheduleIds)
-    .in('tipo', ['domenica_lungo', 'domenica_corto'])
+    .neq('tipo', 'riposo')
     .gte('data', cutoffStr)
   if (shiftErr) throw new Error(`shifts: ${shiftErr.message}`)
 
+  const shiftsDomenica = (shifts ?? []).filter(s => new Date(s.data + 'T12:00:00').getDay() === 0)
+
   const conteggio = new Map<string, { count: number; ultima: string | null }>()
-  for (const s of shifts ?? []) {
+  for (const s of shiftsDomenica) {
     const cur = conteggio.get(s.employee_id) ?? { count: 0, ultima: null }
     cur.count += 1
     if (!cur.ultima || s.data > cur.ultima) cur.ultima = s.data
